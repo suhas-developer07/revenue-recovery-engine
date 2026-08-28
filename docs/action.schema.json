@@ -1,0 +1,50 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://revenue-recovery/action.schema.json",
+  "title": "RecoveryAction",
+  "description": "The single, bounded action shape the Decision Engine may authorize and the Execution Service may run. No action outside this schema is ever executed.",
+  "type": "object",
+  "required": ["action", "target", "reasoning", "attempt_number"],
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": [
+        "RETRY_PAYMENT",
+        "SEND_PAYMENT_LINK",
+        "SEND_REMINDER",
+        "ESCALATE_TO_HUMAN",
+        "LOG_PROMISE_TO_PAY",
+        "STOP_SEQUENCE"
+      ]
+    },
+    "target": {
+      "type": "object",
+      "required": ["order_id"],
+      "properties": {
+        "order_id": { "type": "string" },
+        "customer_id": { "type": "string" }
+      }
+    },
+    "channel": {
+      "type": "string",
+      "enum": ["in_app", "sms", "email", "whatsapp", "voice", "none"],
+      "default": "none"
+    },
+    "reasoning": {
+      "type": "string",
+      "description": "Short natural-language justification, written to the audit log."
+    },
+    "authorized_by_rule": {
+      "type": ["string", "null"],
+      "description": "Name of the policy function that authorized this action, e.g. RETRY_ALLOWED_BELOW_15K_AFA_THRESHOLD. Null only if this object represents a blocked action."
+    },
+    "attempt_number": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "cooldown_until": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    }
+  }
+}

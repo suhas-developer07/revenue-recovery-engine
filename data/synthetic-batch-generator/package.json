@@ -1,0 +1,17 @@
+{
+  "name": "recovery-synthetic-batch-generator",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "generate": "tsx src/generate.ts"
+  },
+  "dependencies": {
+    "pg": "^8.12.0"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.11.10",
+    "@types/node": "^22.5.0",
+    "typescript": "^5.6.2",
+    "tsx": "^4.19.0"
+  }
+}
