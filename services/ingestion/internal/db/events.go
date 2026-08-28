@@ -16,8 +16,6 @@ type Event struct {
 	RawPayload  json.RawMessage
 }
 
-// AlreadyProcessed checks the idempotency table before we do anything else,
-// so a duplicate webhook delivery costs one cheap lookup instead of a failed insert.
 func AlreadyProcessed(ctx context.Context, pool *pgxpool.Pool, razorpayEventID string) (bool, error) {
 	var exists bool
 	err := pool.QueryRow(ctx,
@@ -27,7 +25,6 @@ func AlreadyProcessed(ctx context.Context, pool *pgxpool.Pool, razorpayEventID s
 	return exists, err
 }
 
-// MarkProcessed records that we've handled this Razorpay event ID.
 func MarkProcessed(ctx context.Context, pool *pgxpool.Pool, razorpayEventID string) error {
 	_, err := pool.Exec(ctx,
 		`INSERT INTO processed_webhook_ids (razorpay_event_id) VALUES ($1)
@@ -37,7 +34,6 @@ func MarkProcessed(ctx context.Context, pool *pgxpool.Pool, razorpayEventID stri
 	return err
 }
 
-// InsertEvent writes the parsed event into the events table and returns its new UUID.
 func InsertEvent(ctx context.Context, pool *pgxpool.Pool, e Event) (string, error) {
 	var id string
 	err := pool.QueryRow(ctx,

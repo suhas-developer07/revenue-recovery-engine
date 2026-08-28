@@ -7,18 +7,11 @@ import (
 	"github.com/suhas-developer07/revenue-recovery-engine/services/ingestion/internal/db"
 )
 
-// razorpayPayload models only the envelope fields we need. Razorpay nests the
-// actual entity under payload.payment.entity / payload.subscription.entity /
-// payload.invoice.entity etc., so the shape varies by event type — we keep the
-// payload loose (map[string]any) rather than hand-writing a rigid struct.
 type razorpayPayload struct {
 	Event   string                 `json:"event"`
 	Payload map[string]interface{} `json:"payload"`
 }
 
-// extractEvent pulls the handful of fields we care about out of Razorpay's
-// generic webhook envelope. Uses type assertions with the `ok` boolean so a
-// missing field degrades to a zero value instead of panicking.
 func extractEvent(parsed razorpayPayload, rawBody []byte) (db.Event, error) {
 	var entity map[string]interface{}
 
@@ -60,7 +53,6 @@ func extractEvent(parsed razorpayPayload, rawBody []byte) (db.Event, error) {
 	}, nil
 }
 
-// firstString returns the first non-empty string value among the keys, in order.
 func firstString(entity map[string]interface{}, keys ...string) string {
 	for _, k := range keys {
 		if v, ok := entity[k].(string); ok && v != "" {

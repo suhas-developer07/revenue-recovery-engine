@@ -4,7 +4,6 @@
 
 ## Decision #1 — Why Go + TypeScript, and where the boundary sits
 
-**Date:** Day 1  
 **Decision:** Go for services that touch money directly (Ingestion, Decision Engine); TypeScript for services that touch external APIs and the dashboard (Execution, LLM Orchestrator, Dashboard).
 
 **Reasoning:**
@@ -18,7 +17,6 @@
 
 ## Decision #2 — Ingestion verifies the raw body, not re-serialized JSON
 
-**Date:** Day 1  
 **Decision:** HMAC-SHA256 verification runs against the `[]byte` captured by a single `io.ReadAll(r.Body)` *before* any `json.Unmarshal`. The same bytes are reused for parsing and stored as `raw_payload`.
 
 **Reasoning:**
@@ -30,8 +28,7 @@
 ---
 
 ## Decision #3 — Idempotency via a separate table, checked before insert
-
-**Date:** Day 1  
+ 
 **Decision:** `processed_webhook_ids` table (keyed on `X-Razorpay-Event-Id`, falling back to `event + sha256(body)`) is checked *before* touching `events`.
 
 **Reasoning:**
@@ -45,7 +42,6 @@
 
 ## Decision #4 — Queue via Redis Streams, with a table-poll fallback
 
-**Date:** Day 1  
 **Decision:** The Ingestion service publishes the new event UUID to a single Redis Stream (`new_events`) after a successful insert. Redis publish failure is logged but non-fatal.
 
 **Reasoning:**

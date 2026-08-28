@@ -23,9 +23,6 @@ type Handler struct {
 func (h *Handler) HandleRazorpayWebhook(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// Read the raw body ONCE. HMAC is byte-sensitive: re-marshaling the JSON
-	// before verifying would fail even on genuine Razorpay payloads, so verify
-	// against these exact bytes captured before any Unmarshal.
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "cannot read body", http.StatusBadRequest)
@@ -40,7 +37,6 @@ func (h *Handler) HandleRazorpayWebhook(w http.ResponseWriter, r *http.Request) 
 			"has_signature_header", signature != "",
 			"verify_error", verr,
 		)
-		// Deliberately vague to the caller — don't leak WHY verification failed.
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -54,7 +50,6 @@ func (h *Handler) HandleRazorpayWebhook(w http.ResponseWriter, r *http.Request) 
 
 	razorpayEventID := r.Header.Get("X-Razorpay-Event-Id")
 	if razorpayEventID == "" {
-		// Fall back to a payload-derived ID if the header isn't present (test mode).
 		razorpayEventID = parsed.Event + "_" + hashBody(body)
 	}
 
@@ -66,7 +61,6 @@ func (h *Handler) HandleRazorpayWebhook(w http.ResponseWriter, r *http.Request) 
 	}
 	if alreadyProcessed {
 		slog.Info("duplicate webhook ignored", "razorpay_event_id", razorpayEventID)
-		// Still 200 so Razorpay doesn't retry a duplicate we've already accepted.
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -86,13 +80,11 @@ func (h *Handler) HandleRazorpayWebhook(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if err := db.MarkProcessed(ctx, h.Pool, razorpayEventID); err != nil {
-		// Non-fatal: event is already inserted; worst case we reprocess once.
 		slog.Error("failed to mark webhook as processed", "error", err)
 	}
 
 	if h.Publisher != nil {
 		if err := h.Publisher.PublishNewEvent(ctx, eventID); err != nil {
-			// Non-fatal: the Decision Engine can poll the events table as a fallback.
 			slog.Error("failed to publish to queue", "error", err, "event_id", eventID)
 		}
 	}
