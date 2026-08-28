@@ -1,3 +1,3 @@
 module github.com/suhas-developer07/revenue-recovery-engine/services/ingestion
 
-go 1.22.0
+go 1.25.5

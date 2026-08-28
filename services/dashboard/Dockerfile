@@ -7,6 +7,7 @@ RUN npm install
 
 COPY next.config.js tsconfig.json ./
 COPY app ./app
+COPY public ./public
 RUN npm run build
 
 FROM node:20-alpine
