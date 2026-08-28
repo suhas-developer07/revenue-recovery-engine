@@ -71,8 +71,32 @@ curl localhost:3000          # dashboard
 
 ## What's Real vs. Simulated
 
-- **Real:** Razorpay test-mode webhook ingestion, database schema, policy layer logic, compliance rules
+- **Real:** Razorpay test-mode webhook ingestion (HMAC signature verification + idempotent persistence to Postgres, with Redis Stream publish), database schema, policy layer logic, compliance rules
 - **Simulated:** Channel adapters (SMS/email/WhatsApp/voice) are stubs that log what would be sent. Voice negotiation is a text transcript. Dashboard data will come from synthetic batch in Phase 6.
+
+## Phase 1 — Ingestion (Done)
+
+The **Ingestion** service (`services/ingestion`) receives Razorpay webhooks, verifies their HMAC-SHA256 signature against `RAZORPAY_WEBHOOK_SECRET`, dedupes on event ID, parses the minimal fields, persists each verified event to `events`, and publishes the new event ID to a Redis Stream (`new_events`).
+
+Verify it end to end:
+
+```bash
+# Point the /webhook/razorpay endpoint at a live Razorpay test-mode webhook (via ngrok/cloudflared),
+# then trigger a payment failure. Or replay a signed payload locally:
+curl -X POST localhost:8081/webhook/razorpay -H "Content-Type: application/json" \
+  -H "X-Razorpay-Signature: <hmac-sha256(body, webhook_secret)>" \
+  -H "X-Razorpay-Event-Id: <unique-id>" \
+  -d '{"event":"payment.failed","payload":{"payment":{"entity":{"order_id":"order_X","customer_id":"cust_Y","amount":25000}}}}'
+
+# Confirm the row landed:
+docker exec -it revenue-recovery-postgres psql -U postgres -d revenue_recovery \
+  -c "SELECT event_type, order_id, amount_paise, received_at FROM events;"
+
+# Confirm the queue entry:
+docker exec -it revenue-recovery-redis redis-cli XLEN new_events
+```
+
+Spoofed/unsigned payloads are rejected with `401` and logged under "rejected webhook: invalid or missing signature".
 
 ## Metrics
 

@@ -1,10 +1,12 @@
-FROM alpine:3.20
-
-RUN apk --no-cache add ca-certificates
-
+FROM golang:1.25-alpine AS builder
 WORKDIR /app
-COPY server .
-RUN chmod +x ./server
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -o /ingestion ./cmd/server
 
+FROM alpine:3.20
+RUN apk --no-cache add ca-certificates
+COPY --from=builder /ingestion /ingestion
 EXPOSE 8080
-CMD ["./server"]
+ENTRYPOINT ["/ingestion"]
