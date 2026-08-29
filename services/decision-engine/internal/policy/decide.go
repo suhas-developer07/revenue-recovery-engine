@@ -20,6 +20,7 @@ func Decide(ctx DecisionContext) DecisionTrace {
 	t := DecisionTrace{
 		EventID:         ctx.EventID,
 		CandidateAction: CandidateFromRiskCategory(ctx.RiskCategory),
+		Target:          Target{OrderID: ctx.OrderID, CustomerID: ctx.CustomerID},
 		AttemptNumber:   ctx.AttemptNumber,
 	}
 
@@ -124,7 +125,13 @@ func Decide(ctx DecisionContext) DecisionTrace {
 			"no compliant automated recovery path for this classification", nil)
 	}
 
-	return finalize(&t, action, channel, authorizedBy, false, "all policy checks passed", nil)
+	var cooldown *time.Time
+	if action == ActionRetryPayment {
+		// Authorized retry: record the scheduled next-attempt backoff in the trace,
+		// so the serialized action carries cooldown_until (Phase 4 zod expects it).
+		cooldown = BackoffCooldown(ctx.AttemptNumber, ctx.Now)
+	}
+	return finalize(&t, action, channel, authorizedBy, false, "all policy checks passed", cooldown)
 }
 
 // selectChannel picks the first allowed customer-facing channel, preferring

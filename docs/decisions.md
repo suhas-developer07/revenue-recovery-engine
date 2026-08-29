@@ -124,3 +124,25 @@
 - Reconstituting a past decision by re-running the policy is fragile: it depends on current code and data, not what actually happened. Storing the trace at decision time makes the audit trail exact and immutable.
 - Storing JSON in `reasoning` avoids a schema migration / volume reset on the already-running stack; the schema's `reasoning` TEXT column doubles as the evidence store. A dedicated `trace JSONB` column is a clean Phase 4+ refinement.
 
+## Decision #11 — Decisions are idempotent per classification (no duplicate / attempt inflation on redelivery)
+
+**Date:** Day 3  
+**Decision:** `decisions.classification_id UUID UNIQUE REFERENCES classifications(id)` — Phase 3's equivalent of Phase 1's `processed_webhook_ids`. The decider also check-before-decides (`GetDecisionTraceByClassification`); on a hit it returns the existing verdict without re-running policy, and a UNIQUE-violation on insert (concurrent redelivery) replays the stored trace.
+
+**Reasoning:**
+- `new_classifications` is consumed via a Redis Streams consumer group (**at-least-once**). A redelivered `classification_id` after a restart-before-ack would otherwise insert a second `decisions` row. Worse, `GetAttemptState` counts prior decisions, so the retry would re-declare a *higher* `attempt_number` — flipping an already-authorized retry into `ESCALATE_TO_HUMAN` or silently draining the retry budget. That is exactly the kind of silent double-move a guardrail layer exists to prevent.
+- Verified: calling `/decide` twice on the same event yields exactly one row, `attempt_number = 1`, identical trace.
+
+**Trade-off acknowledged:** A re-evaluation on genuinely new data requires removing the decision row first (as the integration tests do) or a future explicit "force re-decide" flag. For production delivery semantics this is correct — each classification is decided exactly once.
+
+## Decision #12 — The produced action payload mirrors action.schema.json (target included), so Phase 4 zod cannot reject it
+
+**Date:** Day 3  
+**Decision:** `DecisionTrace` carries a `Target {order_id, customer_id}`, populated from the event, alongside `action, channel, reasoning, authorized_by_rule, attempt_number, cooldown_until`. The serialized trace therefore contains every field `docs/action.schema.json` (and the execution service's zod `RecoveryActionSchema`) marks required.
+
+**Reasoning:**
+- Phase 4's TypeScript execution service `safeParse`s every authorized decision against that schema before running it. A field-name or type drift here wouldn't surface in Phase 3 — it would surface as a **rejected action at execution time**. `target` was the missing required field; verifying it now (against the live zod `RecoveryActionSchema`) prevents that Phase 4 validation failure.
+- Keeping the trace (evidence) and the exec payload identical means the audit trail *is* the thing that would run — no translation layer that could introduce drift.
+
+**Trade-off acknowledged:** The trace also carries non-payload fields (`checks`, `candidate_action`, `blocked`, `block_reason`); the execution service validates the authorizable subset, and the extras are structured evidence rather than a contract violation.
+

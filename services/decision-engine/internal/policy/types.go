@@ -78,11 +78,20 @@ type CheckResult struct {
 	Reason   string `json:"reason,omitempty"`
 }
 
+// Target identifies the entity an action applies to. It mirrors action.schema.json's
+// required `target` object (order_id) so Phase 4's zod-validated execution payload
+// is satisfied — a missing target would reject every authorized action.
+type Target struct {
+	OrderID    string `json:"order_id"`
+	CustomerID string `json:"customer_id,omitempty"`
+}
+
 // DecisionTrace is the full ordered reasoning chain for one event, plus the final
 // outcome. It is what --explain and GET /decisions/:event_id/explain render.
 type DecisionTrace struct {
 	EventID          string        `json:"event_id"`
 	CandidateAction  Action        `json:"candidate_action"`
+	Target           Target        `json:"target"`
 	Checks           []CheckResult `json:"checks"`
 	FailedCheck      string        `json:"failed_check,omitempty"`
 	FinalAction      Action        `json:"final_action"`

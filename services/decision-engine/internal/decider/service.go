@@ -38,8 +38,25 @@ type Service struct {
 }
 
 // DecideAndPersist runs the policy layer for one classification and writes exactly
-// one decisions row (authorized or blocked). Returns the decision ID and trace.
+// one decisions row (authorized or blocked). It is idempotent per classification:
+// an at-least-once redelivery of the same classification_id returns the existing
+// decision instead of re-running the policy (which would re-count attempts and
+// could flip an already-authorized retry into an escalation). Returns the decision
+// ID and trace.
 func (s *Service) DecideAndPersist(ctx context.Context, classificationID string) (string, policy.DecisionTrace, error) {
+	// Idempotency: if this classification was already decided, replay that decision
+	// rather than decide it a second time under at-least-once delivery.
+	if existing, err := db.GetDecisionTraceByClassification(ctx, s.Pool, classificationID); err != nil {
+		return "", policy.DecisionTrace{}, err
+	} else if existing != "" {
+		trace, derr := DeserializeTrace(existing)
+		if derr == nil {
+			slog.Debug("classification already decided, replaying existing decision",
+				"classification_id", classificationID)
+			return "", trace, nil
+		}
+	}
+
 	classRow, err := db.GetClassification(ctx, s.Pool, classificationID)
 	if err != nil {
 		return "", policy.DecisionTrace{}, err
@@ -86,17 +103,28 @@ func (s *Service) DecideAndPersist(ctx context.Context, classificationID string)
 
 	decision := db.Decision{
 		EventID:          ev.ID,
+		ClassificationID: classificationID,
 		Action:           string(trace.FinalAction),
 		Channel:          string(trace.FinalChannel),
 		AuthorizedByRule: trace.AuthorizedByRule,
 		Blocked:          trace.Blocked,
 		BlockReason:      trace.BlockReason,
 		AttemptNumber:    dc.AttemptNumber,
-		CooldownUntil:    nextCooldown(trace, dc),
+		CooldownUntil:    trace.CooldownUntil,
 		Reasoning:        traceJSON,
 	}
 
 	decisionID, err := db.InsertDecision(ctx, s.Pool, decision)
+	if err == db.ErrAlreadyDecided {
+		// A concurrent consumer won the race and already decided this
+		// classification — replay its verdict rather than double-counting.
+		if existing, derr := db.GetDecisionTraceByClassification(ctx, s.Pool, classificationID); derr == nil && existing != "" {
+			trace, _ = DeserializeTrace(existing)
+		}
+		slog.Debug("classification decided concurrently, replaying existing decision",
+			"classification_id", classificationID)
+		return "", trace, nil
+	}
 	if err != nil {
 		return "", policy.DecisionTrace{}, err
 	}
@@ -130,18 +158,7 @@ func (s *Service) ExplainEvent(ctx context.Context, eventID string) (policy.Deci
 	return trace, true, nil
 }
 
-// nextCooldown sets an exponential backoff for the NEXT attempt after an
-// authorized retry, so the subsequent decision sees itself within cooldown.
-func nextCooldown(trace policy.DecisionTrace, dc policy.DecisionContext) *time.Time {
-	if trace.Blocked {
-		return nil
-	}
-	if trace.FinalAction == policy.ActionRetryPayment {
-		return policy.BackoffCooldown(dc.AttemptNumber, dc.Now)
-	}
-	return nil
-}
-
+// toChannels converts raw preference strings into policy channels.
 func toChannels(chs []string) []policy.Channel {
 	out := make([]policy.Channel, 0, len(chs))
 	for _, c := range chs {

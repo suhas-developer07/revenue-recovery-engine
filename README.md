@@ -140,9 +140,11 @@ The **guardrail layer**: the thing that stops an autonomous agent from moving mo
   5. **Recurring/mandate only**: `IsBelowAFAThreshold` (RBI ₹15,000 AFA ceiling) + `IsWithinPreDebitWindow` (24h notice). Above ₹15k the candidate `RETRY_PAYMENT` **transforms** into `SEND_PAYMENT_LINK` — never a blind retry.
   6. `IsOptedOut` + `IsOutsideQuietHours` (9am–7pm) — channel opt-out fallback and nap-hours gating.
 - **Explicit candidate mapping** (`CandidateFromRiskCategory`) — diagnosis → action is Go code, *not* inside the LLM.
-- **Always writes a `decisions` row, including blocked ones** — blocked rows are compliance evidence, exactly one per decide.
+- **Always writes a `decisions` row, including blocked ones** — blocked rows are compliance evidence.
+- **Idempotent per classification** — `decisions.classification_id` has a UNIQUE constraint (Phase 3's equivalent of Phase 1's `processed_webhook_ids`), and the decider check-before-decides and replays the existing verdict. A redelivered `classification_id` (at-least-once consumer) can never create a duplicate row or re-count attempts / re-authorize a retry that already ran.
 - **Trace is accumulated during the real run** (`internal/policy/decide.go` builds a `DecisionTrace` as it goes) and serialized to the `reasoning` column. `--explain` reads it back — it is *not* reconstructed after the fact.
-- **Orchestration** (`internal/decider/service.go` + `internal/db/decisions.go`) — fetches mandate/opt-out/attempt history ONCE per event, builds the context, runs `Decide`, computes the next cooldown, and persists.
+- **Action payload is Phase-4-schema-faithful** — `DecisionTrace` carries `target {order_id, customer_id}` plus `action, channel, reasoning, authorized_by_rule, attempt_number, cooldown_until`, matching `docs/action.schema.json`. It validates cleanly against the execution service's zod `RecoveryActionSchema` (no drift that would reject execution).
+- **Orchestration** (`internal/decider/service.go` + `internal/db/decisions.go`) — fetches mandate/opt-out/attempt history ONCE per event, builds the context, runs `Decide`, and persists exactly one row.
 
 Verify it:
 

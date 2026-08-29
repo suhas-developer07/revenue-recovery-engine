@@ -46,6 +46,7 @@ CREATE INDEX idx_classifications_risk_category ON classifications(risk_category)
 CREATE TABLE decisions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   event_id UUID NOT NULL REFERENCES events(id),
+  classification_id UUID UNIQUE REFERENCES classifications(id),
   action TEXT NOT NULL,
   channel TEXT,
   authorized_by_rule TEXT,

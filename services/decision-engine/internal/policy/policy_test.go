@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -9,6 +10,9 @@ func baseCtx() DecisionContext {
 	now := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
 	notice := now.Add(-25 * time.Hour) // notified >24h ago → compliant
 	return DecisionContext{
+		EventID:          "evt-1",
+		OrderID:          "order-1",
+		CustomerID:       "cust-1",
 		RiskCategory:     RiskCategoryInsufficientFunds,
 		AmountPaise:      500000, // ₹5,000
 		AttemptNumber:    1,
@@ -319,5 +323,45 @@ func TestExplainRendersDecisionChain(t *testing.T) {
 	}
 	if len(trace.Checks) == 0 {
 		t.Fatal("expected accumulated checks in trace")
+	}
+}
+
+func TestTraceIncludesTarget(t *testing.T) {
+	// Phase 4's zod schema requires `target: { order_id }`. Without it every
+	// authorized action would be rejected at execution time.
+	trace := Decide(baseCtx())
+	if trace.Target.OrderID != "order-1" || trace.Target.CustomerID != "cust-1" {
+		t.Errorf("expected target order-1/cust-1, got %s/%s",
+			trace.Target.OrderID, trace.Target.CustomerID)
+	}
+}
+
+func TestSerializedTraceSatisfiesActionSchema(t *testing.T) {
+	// Assert the fields Phase 4 zod-validates (RecoveryActionSchema) are all
+	// present in the serialized trace, mirroring docs/action.schema.json's
+	// required set: action, target.order_id, reasoning, attempt_number, plus
+	// channel, authorized_by_rule, cooldown_until.
+	trace := Decide(baseCtx())
+	raw, _ := json.Marshal(trace)
+
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("trace did not marshal as JSON object: %v", err)
+	}
+
+	required := []string{"final_action", "target", "reasoning", "attempt_number",
+		"final_channel", "authorized_by_rule", "cooldown_until"}
+	for _, f := range required {
+		if _, ok := obj[f]; !ok {
+			t.Errorf("serialized decision missing field required by action schema: %s", f)
+		}
+	}
+
+	var target map[string]json.RawMessage
+	if err := json.Unmarshal(obj["target"], &target); err != nil {
+		t.Fatalf("target not an object: %v", err)
+	}
+	if _, ok := target["order_id"]; !ok {
+		t.Error("target missing required order_id")
 	}
 }
