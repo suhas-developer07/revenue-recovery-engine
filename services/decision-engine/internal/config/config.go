@@ -11,6 +11,7 @@ type Config struct {
 	DatabaseURL        string
 	RedisURL           string
 	LLMOrchestratorURL string
+	ExecutionURL       string
 }
 
 func Load() Config {
@@ -23,6 +24,7 @@ func Load() Config {
 		DatabaseURL:        getEnv("DATABASE_URL", ""),
 		RedisURL:           getEnv("REDIS_URL", ""),
 		LLMOrchestratorURL: getEnv("LLM_ORCHESTRATOR_URL", "http://localhost:8084"),
+		ExecutionURL:       getEnv("EXECUTION_URL", "http://localhost:8083"),
 	}
 }
 

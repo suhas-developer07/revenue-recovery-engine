@@ -66,7 +66,7 @@ CREATE INDEX idx_decisions_blocked ON decisions(blocked);
 -- ============================================================
 CREATE TABLE actions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  decision_id UUID NOT NULL REFERENCES decisions(id),
+  decision_id UUID NOT NULL UNIQUE REFERENCES decisions(id),
   status TEXT NOT NULL CHECK (status IN ('success', 'failed', 'pending')),
   amount_recovered_paise BIGINT NOT NULL DEFAULT 0,
   executed_at TIMESTAMPTZ NOT NULL DEFAULT now(),

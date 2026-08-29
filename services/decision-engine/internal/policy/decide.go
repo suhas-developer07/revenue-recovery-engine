@@ -19,6 +19,7 @@ func Decide(ctx DecisionContext) DecisionTrace {
 
 	t := DecisionTrace{
 		EventID:         ctx.EventID,
+		AmountPaise:     ctx.AmountPaise,
 		CandidateAction: CandidateFromRiskCategory(ctx.RiskCategory),
 		Target:          Target{OrderID: ctx.OrderID, CustomerID: ctx.CustomerID},
 		AttemptNumber:   ctx.AttemptNumber,

@@ -146,3 +146,21 @@
 
 **Trade-off acknowledged:** The trace also carries non-payload fields (`checks`, `candidate_action`, `blocked`, `block_reason`); the execution service validates the authorizable subset, and the extras are structured evidence rather than a contract violation.
 
+## Decision #13 — Execution re-validates + is idempotent per decision; SEND_PAYMENT_LINK recovers only on confirmed capture
+
+**Date:** Day 4  
+**Decision:**
+1. **Transport:** authorized (non-blocked) decisions are handed to the Execution service synchronously over HTTP (`/execute`) with `decision_id`, `event_id`, `amount_paise` plus the action. Dispatch is fire-and-forget & non-fatal — a failure never fails the already-persisted decision.
+2. **Re-validation:** the Execution service runs every action through its own TypeScript zod `RecoveryActionSchema`, independently of the Go decision engine. `LLM proposes, code disposes` holds across the Go/TS boundary.
+3. **Idempotency:** `actions.decision_id` is `UNIQUE` (migration `0004`); the executor checks `getActionByDecisionId` before dispatching. Redelivery returns the stored result — no double-send.
+4. **Recover accounting:** `amount_recovered_paise` is populated precisely — `RETRY_PAYMENT` only on a **confirmed Razorpay capture**; `SEND_PAYMENT_LINK` as `pending/0` until a follow-up sweep confirms the linked payment captured (then `success` + real amount). Every other action contributes 0 directly.
+
+**Reasoning:**
+- Two independently-implemented checks on the same contract (Go producing, TS validating) catch drift one side would miss — the exact `target`-drift bug from Phase 3 would now be a logged rejection, not a silent failure.
+- The pending-then-confirmed payment-link definition is the *honest* one: a link is created but doesn't recover money until the customer pays it. Counting a created link as recovered would inflate the Phase 6 ₹-recovered metric with an un-credited number. A follow-up sweep (like Phase 2's abandonment sweep) flips it only on actual capture.
+- Same at-least-once discipline as Phases 1 & 3 — this bug class has appeared twice already in this architecture, so guarding execution is not hypothetical.
+
+**Verified:** all six handlers write exactly one `actions` row; a `RETRY` without confirmed capture records `failed/0` while a confirmed one records `success/amount`; a `SEND_PAYMENT_LINK` stays `pending/0` and flips to `success/amount` only when the sweep observes capture; two `/execute` calls on the same `decision_id` yield one row (`deduplicated` on the second); malformed/unknown actions are rejected with `invalid action` and never partially executed.
+
+**Trade-off acknowledged:** synchronous HTTP dispatch (chosen over a `new_decisions` Redis stream for this project's scale) means the Execution service is on the decision's critical path; the non-fatal, logged dispatch keeps a down execution service from corrupting the decision ledger, though a separate sweep would be needed to (re)dispatch actions decided while execution was down.
+

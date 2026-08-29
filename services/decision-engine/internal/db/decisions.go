@@ -154,6 +154,26 @@ func GetLatestDecisionTrace(ctx context.Context, pool *pgxpool.Pool, eventID str
 	return raw, nil
 }
 
+// GetDecisionByClassification returns the decision ID and its stored trace for a
+// classification_id. It is used to correlate an execution dispatch back to the exact
+// decisions row (for actions.decision_id) even when the decision was replayed from a
+// prior classify (idempotent redelivery), where the insert-path decision ID is empty.
+func GetDecisionByClassification(ctx context.Context, pool *pgxpool.Pool, classificationID string) (string, string, error) {
+	var id string
+	var raw string
+	err := pool.QueryRow(ctx,
+		`SELECT id, COALESCE(reasoning, '') FROM decisions WHERE classification_id = $1`,
+		classificationID,
+	).Scan(&id, &raw)
+	if err == pgx.ErrNoRows {
+		return "", "", nil
+	}
+	if err != nil {
+		return "", "", err
+	}
+	return id, raw, nil
+}
+
 // GetDecisionCount returns how many decisions have been recorded for an event.
 func GetDecisionCount(ctx context.Context, pool *pgxpool.Pool, eventID string) (int, error) {
 	var n int

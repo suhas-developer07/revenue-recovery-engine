@@ -15,6 +15,7 @@ import (
 	"github.com/suhas-developer07/revenue-recovery-engine/services/decision-engine/internal/config"
 	"github.com/suhas-developer07/revenue-recovery-engine/services/decision-engine/internal/db"
 	"github.com/suhas-developer07/revenue-recovery-engine/services/decision-engine/internal/decider"
+	"github.com/suhas-developer07/revenue-recovery-engine/services/decision-engine/internal/dispatch"
 	"github.com/suhas-developer07/revenue-recovery-engine/services/decision-engine/internal/llm"
 	"github.com/suhas-developer07/revenue-recovery-engine/services/decision-engine/internal/queue"
 )
@@ -118,7 +119,12 @@ func main() {
 		decisionConsumer := queue.NewConsumer(rdb, queue.StreamClassifications, "decider-worker")
 		go func() {
 			err := decisionConsumer.Run(workerCtx, func(ctx context.Context, classificationID string) error {
-				_, _, err := decSvc.DecideAndPersist(ctx, classificationID)
+				decisionID, trace, err := decSvc.DecideAndPersist(ctx, classificationID)
+				if err == nil {
+					// Fire the authorized action off to the Execution service; failures
+					// here are non-fatal (the decision row is already persisted).
+					dispatch.Dispatch(ctx, cfg.ExecutionURL, decisionID, trace)
+				}
 				return err
 			})
 			if err != nil && err != context.Canceled {
@@ -161,13 +167,14 @@ func main() {
 			w.Write([]byte(`{"error":"classification failed"}`))
 			return
 		}
-		_, trace, err := decSvc.DecideAndPersist(r.Context(), classID)
+		decisionID, trace, err := decSvc.DecideAndPersist(r.Context(), classID)
 		if err != nil {
 			slog.Error("decide: decision failed", "error", err, "event_id", eventID)
 			w.WriteHeader(http.StatusInternalServerError)
 			w.Write([]byte(`{"error":"decision failed"}`))
 			return
 		}
+		dispatch.Dispatch(r.Context(), cfg.ExecutionURL, decisionID, trace)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{

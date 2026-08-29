@@ -90,6 +90,7 @@ type Target struct {
 // outcome. It is what --explain and GET /decisions/:event_id/explain render.
 type DecisionTrace struct {
 	EventID          string        `json:"event_id"`
+	AmountPaise      int64         `json:"amount_paise"`
 	CandidateAction  Action        `json:"candidate_action"`
 	Target           Target        `json:"target"`
 	Checks           []CheckResult `json:"checks"`

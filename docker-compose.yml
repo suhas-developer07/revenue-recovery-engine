@@ -57,6 +57,7 @@ services:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/revenue_recovery?sslmode=disable
       REDIS_URL: redis://redis:6379
       LLM_ORCHESTRATOR_URL: http://llm-orchestrator:8080
+      EXECUTION_URL: http://execution:8080
     ports:
       - "8082:8080"
     depends_on:
@@ -73,6 +74,7 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/revenue_recovery?sslmode=disable
+      LLM_ORCHESTRATOR_URL: http://llm-orchestrator:8080
     ports:
       - "8083:8080"
     depends_on:

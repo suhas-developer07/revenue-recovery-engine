@@ -53,7 +53,12 @@ func (s *Service) DecideAndPersist(ctx context.Context, classificationID string)
 		if derr == nil {
 			slog.Debug("classification already decided, replaying existing decision",
 				"classification_id", classificationID)
-			return "", trace, nil
+			// Resolve the decision ID so upstream dispatch can still correlate.
+			id, _, gerr := db.GetDecisionByClassification(ctx, s.Pool, classificationID)
+			if gerr != nil {
+				return "", policy.DecisionTrace{}, gerr
+			}
+			return id, trace, nil
 		}
 	}
 
@@ -121,9 +126,13 @@ func (s *Service) DecideAndPersist(ctx context.Context, classificationID string)
 		if existing, derr := db.GetDecisionTraceByClassification(ctx, s.Pool, classificationID); derr == nil && existing != "" {
 			trace, _ = DeserializeTrace(existing)
 		}
+		id, _, gerr := db.GetDecisionByClassification(ctx, s.Pool, classificationID)
+		if gerr != nil {
+			return "", policy.DecisionTrace{}, gerr
+		}
 		slog.Debug("classification decided concurrently, replaying existing decision",
 			"classification_id", classificationID)
-		return "", trace, nil
+		return id, trace, nil
 	}
 	if err != nil {
 		return "", policy.DecisionTrace{}, err

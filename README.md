@@ -163,6 +163,39 @@ docker exec -it revenue-recovery-postgres psql -U postgres -d revenue_recovery \
 
 Key guarantees: a revoked mandate can never be retried; a recurring charge above ₹15,000 is never silently retried; a customer is never contacted outside 9am–7pm local; and retries stop after 3 attempts. Currency is integer paise throughout.
 
+## Phase 4 — Execution & LLM Orchestrator (Done)
+
+The **recovery layer**: authorized decisions become real (test-mode) Razorpay calls and real (or stubbed) customer contact. When the decision engine authorizes a non-blocked action, it POSTs the action (plus `decision_id`, `event_id`, `amount_paise`) to the Execution service over HTTP; the Execution service re-validates it, executes it, and writes exactly one `actions` row. The LLM Orchestrator's `/draft` writes the message copy.
+
+- **Independent re-validation (`LLM proposes, code disposes`)** — the Execution service re-runs the action through its own TypeScript zod `RecoveryActionSchema`, independent of the Go decision engine's authorization. A malformed/unknown action is **rejected and logged, never partially executed** (a schema-drift class like the missing `target` would surface here, not as a silent failure).
+- **Idempotent per decision** — `actions.decision_id` has a UNIQUE constraint (migration `0004`), and the executor checks `getActionByDecisionId` before dispatching. A redelivered decision (HTTP retry / stream at-least-once) returns the stored result instead of double-sending a payment link or double-attempting a retry — the same bug class guarded in Phases 1 & 3.
+- **One `actions` row, always** (`internal` → `services/execution/src/handlers`) — every handler writes a `{success|failed|pending}` row with `outcome_payload`. Handlers: `RETRY_PAYMENT`, `SEND_PAYMENT_LINK`, `SEND_REMINDER` (→ `/draft` + channel adapter), `ESCALATE_TO_HUMAN` (pending human todo), `LOG_PROMISE_TO_PAY` (thin → Phase 5), `STOP_SEQUENCE` (terminal marker).
+- **Swappable channel adapters** (`services/execution/src/adapters`) — `SmsAdapter` / `EmailAdapter` / `WhatsAppAdapter` / `VoiceAdapter` implementing one `send()` interface. Stubs log the send honestly (`[EMAIL] to=cust: "..."`) and return success; swapping in Twilio/Resend later, or adding a Hinglish voice adapter in Phase 7, touches nothing else.
+- **`/draft` message copy** (`services/llm-orchestrator/src/draft.ts`) — given the risk category, the actual `root_cause_narrative` from Phase 2's classification, amount, channel and attempt number, it produces root-cause-specific copy ("looks like your bank declined this…") with a heuristic fallback when no `ANTHROPIC_API_KEY` is set. The LLM writes the wording only — it never decides whether or who to contact.
+- **Honest recover accounting** (`amount_recovered_paise`) — `RETRY_PAYMENT` counts the full amount **only on a confirmed Razorpay capture** (never on "attempted"). `SEND_PAYMENT_LINK` is recorded `status: pending, amount 0` until a follow-up sweep confirms the linked payment actually captured — that's exactly when it flips to `success` + the real amount. Full methodology in `docs/decisions.md` #13.
+
+Verify it:
+
+```bash
+# The Execution service re-validates + executes an action directly
+curl -s -X POST localhost:8083/execute -H "Content-Type: application/json" -d '{
+  "decision_id":"<decision-uuid>","event_id":"<event-uuid>","amount_paise":250000,
+  "action":"SEND_PAYMENT_LINK","target":{"order_id":"<order>","customer_id":"<cust>"},
+  "channel":"email","reasoning":"authorized","authorized_by_rule":"TEST_RULE",
+  "attempt_number":1,"cooldown_until":null}'
+
+# A zod-malformed action is rejected, not executed
+curl -s -X POST localhost:8083/execute -H "Content-Type: application/json" \
+  -d '{"decision_id":"x","action":"RETRY_PAYMENT","reasoning":"bad","attempt_number":1}'
+# -> {"error":"invalid action", ...}
+
+# Inspect the actions evidence (the recovery ledger)
+docker exec -it revenue-recovery-postgres psql -U postgres -d revenue_recovery \
+  -c "SELECT a.status, a.amount_recovered_paise, a.outcome_payload->>'kind' FROM actions a;"
+```
+
+The full pipeline is automatic: a signed webhook → ingested → classified → decided → dispatched → executed, with each layer leaving its own evidence row (`events` → `classifications` → `decisions` → `actions`).
+
 ## Metrics
 
 > Populated after running the synthetic batch in Phase 6.
