@@ -29,10 +29,10 @@ CREATE TABLE processed_webhook_ids (
 -- ============================================================
 CREATE TABLE classifications (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  event_id UUID NOT NULL REFERENCES events(id),
+  event_id UUID NOT NULL REFERENCES events(id) UNIQUE,
   risk_category TEXT NOT NULL,
   root_cause_narrative TEXT,
-  classified_by TEXT NOT NULL CHECK (classified_by IN ('rules_engine', 'llm')),
+  classified_by TEXT NOT NULL CHECK (classified_by IN ('rules_engine', 'llm', 'sweep')),
   priority_score NUMERIC,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

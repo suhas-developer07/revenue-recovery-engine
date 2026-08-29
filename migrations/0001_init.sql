@@ -37,7 +37,7 @@ CREATE TABLE classifications (
   risk_category TEXT NOT NULL,       -- 'insufficient_funds' | 'bank_timeout' | 'expired_card' | 'otp_failure'
                                       -- | 'risk_block' | 'mandate_revoked' | 'checkout_abandoned' | 'invoice_overdue'
   root_cause_narrative TEXT,         -- human-readable explanation, often LLM-generated
-  classified_by TEXT NOT NULL CHECK (classified_by IN ('rules_engine', 'llm')),
+  classified_by TEXT NOT NULL CHECK (classified_by IN ('rules_engine', 'llm', 'sweep')),
   priority_score NUMERIC,            -- amount_at_risk x recoverability_weight — used for batch prioritization
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

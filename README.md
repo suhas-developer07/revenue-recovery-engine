@@ -1,7 +1,7 @@
 # AI Revenue Recovery
 
 An AI-powered system that detects payment failures, classifies root causes, decides compliant recovery actions through a deterministic policy layer, and executes recovery — with a full audit trail and honest batch metrics.
-
+opencode -s ses_fb7a6b6e6ffeb1EMIkXaoxHYHQ
 ## Problem
 
 Razorpay merchants lose revenue across four disconnected leak points:
@@ -97,6 +97,35 @@ docker exec -it revenue-recovery-redis redis-cli XLEN new_events
 ```
 
 Spoofed/unsigned payloads are rejected with `401` and logged under "rejected webhook: invalid or missing signature".
+
+## Phase 2 — Detection & Classification (Done)
+
+The **Decision Engine** (`services/decision-engine`) classifies every ingested event into one of a closed set of `risk_category` values, writing exactly one row to `classifications` per event:
+
+- **Rules engine** (`internal/classifier/rules.go`) — an ordered table of substring matchers grounded on realistic Razorpay error codes/reasons. Cheap, deterministic, handles the majority.
+- **LLM fallback** — only when no rule matches. The Go service calls `llm-orchestrator`'s `/classify` endpoint (which validates against the same closed enum via zod). With no `ANTHROPIC_API_KEY` set, it falls back to a deterministic keyword heuristic so the pipeline stays fully testable.
+- **Enum enforcement** — `ValidCategory()` is asserted on every result (rules and LLM alike) before writing, so a bad string can never corrupt Phase 3's policy matching.
+- **`priority_score`** — `amount_paise/100 × recoverability_weight[category]`, stored at classification time to drive batch prioritization later.
+- **checkout_abandoned sweep** — a `time.Ticker` background sweep detects orders past the 30-minute window that never reached a paid state (consult `internal/db/abandoned.go`). This is absence-based polling, not a webhook.
+- **Publish** — each new classification is pushed to the `new_classifications` Redis stream for Phase 3.
+
+The Decision Engine consumes `new_events` via a Redis Streams consumer group (at-least-once) and backfills any events missed on startup — guaranteeing "every event ⇒ exactly one classification".
+
+Verify it:
+
+```bash
+# A rules-matched failure → classified by rules_engine
+curl -s localhost:8084/classify -H "Content-Type: application/json" \
+  -d '{"event_type":"payment.failed","signal":"bank declined insufficient funds"}'  # llm-orchestrator
+
+# Inspect classifications
+docker exec -it revenue-recovery-postgres psql -U postgres -d revenue_recovery \
+  -c "SELECT e.order_id, c.risk_category, c.classified_by, round(c.priority_score::numeric,2) FROM classifications c JOIN events e ON e.id=c.event_id;"
+
+# Rules vs LLM split
+docker exec -it revenue-recovery-postgres psql -U postgres -d revenue_recovery \
+  -c "SELECT classified_by, count(*) FROM classifications GROUP BY classified_by;"
+```
 
 ## Metrics
 
