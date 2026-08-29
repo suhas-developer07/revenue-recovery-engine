@@ -92,3 +92,35 @@
 - It also foreshadows the general scheduler Phase 6 needs for batch processing.
 
 **Trade-off acknowledged:** Sweep latency means abandonment isn't classified the instant it happens (bounded by the sweep interval, default 2 min). This is fine — recovery actions never need sub-second abandonment detection.
+
+## Decision #8 — The guardrail layer is a pure, ordered policy engine
+
+**Date:** Day 3  
+**Decision:** Every classified event goes through `internal/policy/decide.go`, a *pure* orchestrator that returns a `DecisionTrace` (ordered check list + final verdict). Policy functions take a `DecisionContext` struct and return `(bool, string)` with **no DB access**. Checks run in a fixed order: hard kill-switches (mandate revoked, escalation ceiling) first, then soft rules (max attempts, cooldown, AFA/pre-debit for recurring debits, opt-out, quiet hours). Candidate action selection lives in `CandidateFromRiskCategory` — explicit Go code, deliberately **not** in the LLM.
+
+**Reasoning:**
+- This is the "what stops your agent from moving money it shouldn't?" differentiator. If policy depended on the LLM, a hallucinated classification could move money — the whole point is that on-chain guardrails catch policy violations deterministically.
+- Pure functions make the logic trivially testable (no DB/mocks) and auditable — the exact inputs to every check are recorded in the trace.
+
+**Trade-off acknowledged:** The `DecisionContext` must be assembled before deciding, so the DB orchestration (`internal/decider`) is separate from the pure policy code to keep the policy layer side-effect-free.
+
+## Decision #9 — Above ₹15k a retry *transforms* into a payment link, and quiet hours gate proactive nudges only
+
+**Date:** Day 3  
+**Decision:** RBI's AFA threshold (₹15,000) is enforced as `IsBelowAFAThreshold`. When a recurring charge exceeds it, the candidate `RETRY_PAYMENT` is **not** just blocked — it *transforms* into an authorized `SEND_PAYMENT_LINK` (an authenticated, customer-initiated recovery) instead of a blind retry. Separately, quiet hours (9am–7pm local) block `SEND_REMINDER` (a proactive, unsolicited nudge), but **not** `SEND_PAYMENT_LINK`, which is an action-focused, expected response to a just-failed payment.
+
+**Reasoning:**
+- Above the AFA ceiling a silent auto-debit isn't just risky, it's non-compliant; but the recovery *is* still legitimate — routing to a payment link preserves recovery while restoring compliance.
+- A payment link after a failed payment is expected and low-disruption; an unsolicited reminder at 10pm is a compliance nap-violation. Treating them differently is defensible and demonstrable regardless of the current clock, which keeps testing deterministic.
+
+**Trade-off acknowledged:** This narrows the "quiet hours block all outbound contact" rule. Enforced at Phase 4 as well — batch scheduling must not send SEND_REMINDER outside the window.
+
+## Decision #10 — Decision traces are stored verbatim as evidence, never reconstructed
+
+**Date:** Day 3  
+**Decision:** `Decide` accumulates a `DecisionTrace` (every `CheckResult` plus the final verdict) during the real run. It is JSON-serialized into the existing `decisions.reasoning` column at insert time. `--explain` and `GET /decisions/:event_id/explain` load that stored JSON and render it — they do **not** re-run the policy.
+
+**Reasoning:**
+- Reconstituting a past decision by re-running the policy is fragile: it depends on current code and data, not what actually happened. Storing the trace at decision time makes the audit trail exact and immutable.
+- Storing JSON in `reasoning` avoids a schema migration / volume reset on the already-running stack; the schema's `reasoning` TEXT column doubles as the evidence store. A dedicated `trace JSONB` column is a clean Phase 4+ refinement.
+

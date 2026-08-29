@@ -44,8 +44,12 @@ seed:
 	cd data/synthetic-batch-generator && npm run generate
 
 ## Print the full reasoning trace for a given event ID (Phase 3's --explain mode)
+## Requires the decision-engine container to be up and the DB reachable on localhost.
 explain:
-	cd services/decision-engine && go run ./cmd/server --explain $(EVENT_ID)
+	cd services/decision-engine && \
+	DATABASE_URL="postgres://postgres:postgres@localhost:5432/revenue_recovery?sslmode=disable" \
+	REDIS_URL="redis://localhost:6379" \
+		go run ./cmd/server --explain $(EVENT_ID)
 
 ## Format all Go and TS code
 fmt:

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"github.com/suhas-developer07/revenue-recovery-engine/services/decision-engine/internal/classifier"
 	"github.com/suhas-developer07/revenue-recovery-engine/services/decision-engine/internal/config"
 	"github.com/suhas-developer07/revenue-recovery-engine/services/decision-engine/internal/db"
+	"github.com/suhas-developer07/revenue-recovery-engine/services/decision-engine/internal/decider"
 	"github.com/suhas-developer07/revenue-recovery-engine/services/decision-engine/internal/llm"
 	"github.com/suhas-developer07/revenue-recovery-engine/services/decision-engine/internal/queue"
 )
@@ -24,6 +26,22 @@ const (
 )
 
 func main() {
+	// --explain <eventID>: print the stored reasoning trace for a past decision.
+	for i, a := range os.Args[1:] {
+		if a == "--explain" {
+			eventID := ""
+			if i+2 < len(os.Args) {
+				eventID = os.Args[i+2]
+			}
+			if eventID == "" {
+				slog.Error("usage: --explain <event_id>")
+				os.Exit(2)
+			}
+			runExplain(eventID)
+			return
+		}
+	}
+
 	cfg := config.Load()
 	ctx := context.Background()
 
@@ -42,6 +60,7 @@ func main() {
 
 	llmClient := llm.NewClient(cfg.LLMOrchestratorURL)
 	svc := &classifier.Service{Pool: pool, LLM: llmClient}
+	decSvc := &decider.Service{Pool: pool}
 
 	var publisher *queue.Publisher
 	if rdb != nil {
@@ -93,6 +112,21 @@ func main() {
 		}
 	}()
 
+	// 4. Consume new_classifications stream and run each through the decision
+	//    engine, writing exactly one decisions row (authorized or blocked).
+	if rdb != nil {
+		decisionConsumer := queue.NewConsumer(rdb, queue.StreamClassifications, "decider-worker")
+		go func() {
+			err := decisionConsumer.Run(workerCtx, func(ctx context.Context, classificationID string) error {
+				_, _, err := decSvc.DecideAndPersist(ctx, classificationID)
+				return err
+			})
+			if err != nil && err != context.Canceled {
+				slog.Error("decision consumer exited", "error", err)
+			}
+		}()
+	}
+
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
@@ -117,9 +151,85 @@ func main() {
 		w.Write([]byte(`{"classification_id":"` + id + `"}`))
 	})
 
+	// Manually run the decision layer for an event (classify -> decide -> persist).
+	r.Post("/decide/{eventID}", func(w http.ResponseWriter, r *http.Request) {
+		eventID := chi.URLParam(r, "eventID")
+		classID, err := svc.ClassifyEventByID(r.Context(), eventID)
+		if err != nil {
+			slog.Error("decide: classification failed", "error", err, "event_id", eventID)
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error":"classification failed"}`))
+			return
+		}
+		_, trace, err := decSvc.DecideAndPersist(r.Context(), classID)
+		if err != nil {
+			slog.Error("decide: decision failed", "error", err, "event_id", eventID)
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error":"decision failed"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"event_id":           eventID,
+			"action":             trace.FinalAction,
+			"channel":            trace.FinalChannel,
+			"blocked":            trace.Blocked,
+			"block_reason":       trace.BlockReason,
+			"authorized_by_rule": trace.AuthorizedByRule,
+		})
+	})
+
+	// Explain endpoint: returns the stored (accumulated) decision trace as JSON.
+	r.Get("/decisions/{eventID}/explain", func(w http.ResponseWriter, r *http.Request) {
+		eventID := chi.URLParam(r, "eventID")
+		trace, found, err := decSvc.ExplainEvent(r.Context(), eventID)
+		if err != nil {
+			slog.Error("explain failed", "error", err, "event_id", eventID)
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error":"failed to load decision trace"}`))
+			return
+		}
+		if !found {
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"error":"no decision recorded for event"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(trace)
+	})
+
 	slog.Info("decision-engine service starting", "port", cfg.Port)
 	if err := http.ListenAndServe(":"+cfg.Port, r); err != nil {
 		slog.Error("server failed", "error", err)
 		os.Exit(1)
 	}
+}
+
+// runExplain loads the stored decision trace for an event and prints the ordered
+// reasoning chain. It reads the trace persisted at decision time — it does not
+// re-run the policy (the trace is evidence, not a reconstruction).
+func runExplain(eventID string) {
+	cfg := config.Load()
+	ctx := context.Background()
+
+	pool, err := db.NewPool(ctx, cfg.DatabaseURL)
+	if err != nil {
+		slog.Error("failed to connect to database", "error", err)
+		os.Exit(1)
+	}
+	defer pool.Close()
+
+	svc := &decider.Service{Pool: pool}
+	trace, found, err := svc.ExplainEvent(ctx, eventID)
+	if err != nil {
+		slog.Error("explain failed", "error", err)
+		os.Exit(1)
+	}
+	if !found {
+		slog.Error("no decision recorded for event", "event_id", eventID)
+		os.Exit(1)
+	}
+	println(trace.Explain())
 }

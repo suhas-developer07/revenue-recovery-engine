@@ -40,12 +40,13 @@ func (c *Consumer) EnsureGroup(ctx context.Context) error {
 	return err
 }
 
-// HandleFunc processes a single event ID. It returns an error if the event could
-// not be processed; in that case the message is left un-acked for later retry.
-type HandleFunc func(ctx context.Context, eventID string) error
+// HandleFunc processes a single message payload ID (event id or classification
+// id, depending on the stream). It returns an error if the message could not be
+// processed; in that case the message is left un-acked for later retry.
+type HandleFunc func(ctx context.Context, id string) error
 
-// Run blocks, reading new events in a loop and routing each to handle. It returns
-// when ctx is cancelled.
+// Run blocks, reading new messages in a loop and routing each to handle. It
+// returns when ctx is cancelled.
 func (c *Consumer) Run(ctx context.Context, handle HandleFunc) error {
 	if err := c.EnsureGroup(ctx); err != nil {
 		return err
@@ -76,15 +77,19 @@ func (c *Consumer) Run(ctx context.Context, handle HandleFunc) error {
 
 		for _, stream := range streams {
 			for _, msg := range stream.Messages {
-				eventID, _ := msg.Values["event_id"].(string)
-				if eventID == "" {
+				// new_events carries event_id, new_classifications carries classification_id.
+				id, _ := msg.Values["classification_id"].(string)
+				if id == "" {
+					id, _ = msg.Values["event_id"].(string)
+				}
+				if id == "" {
 					// Nothing useful to reprocess; ack to avoid a stuck message.
 					_ = c.Ack(ctx, msg.ID)
 					continue
 				}
 
-				if err := handle(ctx, eventID); err != nil {
-					slog.Error("failed to handle event", "error", err, "event_id", eventID)
+				if err := handle(ctx, id); err != nil {
+					slog.Error("failed to handle message", "error", err, "id", id, "stream", c.stream)
 					// Leave un-acked so a later run retries it.
 					continue
 				}

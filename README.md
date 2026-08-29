@@ -127,6 +127,40 @@ docker exec -it revenue-recovery-postgres psql -U postgres -d revenue_recovery \
   -c "SELECT classified_by, count(*) FROM classifications GROUP BY classified_by;"
 ```
 
+## Phase 3 — Policy & Decision Engine (Done)
+
+The **guardrail layer**: the thing that stops an autonomous agent from moving money it shouldn't. For every classified event the policy engine produces exactly **one** `decisions` row — either an **authorized** action or a **blocked** verdict — with the full reasoning chain captured as evidence.
+
+- **Pure policy functions** (`internal/policy/*.go`) — no DB access. Each takes a `DecisionContext` and returns `(allowed bool, reason string)`. Checks run in a fixed order: hard kill-switches first, then soft rules.
+- **Propose → Check → Authorize/Block** (`internal/policy/decide.go`):
+  1. `IsMandateRevoked` — revoked mandate ⇒ `STOP_SEQUENCE` (the agent never touches that account again).
+  2. `HasExceededEscalationCeiling` — cross-channel escalation exhausted ⇒ stop.
+  3. `HasExceededMaxAttempts` — retry cap (3) ⇒ route to `ESCALATE_TO_HUMAN`.
+  4. `IsWithinCooldown` — exponential backoff respects the scheduled next attempt.
+  5. **Recurring/mandate only**: `IsBelowAFAThreshold` (RBI ₹15,000 AFA ceiling) + `IsWithinPreDebitWindow` (24h notice). Above ₹15k the candidate `RETRY_PAYMENT` **transforms** into `SEND_PAYMENT_LINK` — never a blind retry.
+  6. `IsOptedOut` + `IsOutsideQuietHours` (9am–7pm) — channel opt-out fallback and nap-hours gating.
+- **Explicit candidate mapping** (`CandidateFromRiskCategory`) — diagnosis → action is Go code, *not* inside the LLM.
+- **Always writes a `decisions` row, including blocked ones** — blocked rows are compliance evidence, exactly one per decide.
+- **Trace is accumulated during the real run** (`internal/policy/decide.go` builds a `DecisionTrace` as it goes) and serialized to the `reasoning` column. `--explain` reads it back — it is *not* reconstructed after the fact.
+- **Orchestration** (`internal/decider/service.go` + `internal/db/decisions.go`) — fetches mandate/opt-out/attempt history ONCE per event, builds the context, runs `Decide`, computes the next cooldown, and persists.
+
+Verify it:
+
+```bash
+# Decide an event (classify + policy + persist)
+curl -X POST localhost:8082/decide/<event-uuid>
+
+# Playback the stored reasoning trace (the audit trail)
+curl -s localhost:8082/decisions/<event-uuid>/explain | python3 -m json.tool
+go run ./cmd/server --explain <event-uuid>        # Makefile: make explain EVENT_ID=<uuid>
+
+# Inspect decisions evidence
+docker exec -it revenue-recovery-postgres psql -U postgres -d revenue_recovery \
+  -c "SELECT d.action, d.blocked, COALESCE(d.block_reason,'-') FROM decisions d;"
+```
+
+Key guarantees: a revoked mandate can never be retried; a recurring charge above ₹15,000 is never silently retried; a customer is never contacted outside 9am–7pm local; and retries stop after 3 attempts. Currency is integer paise throughout.
+
 ## Metrics
 
 > Populated after running the synthetic batch in Phase 6.
