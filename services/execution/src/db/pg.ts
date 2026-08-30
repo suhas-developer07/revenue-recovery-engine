@@ -37,15 +37,15 @@ export async function insertAction(input: {
   return res.rows[0] as ActionRow;
 }
 
-export type PendingLinkRow = ActionRow & { order_id: string };
+export type PendingLinkRow = ActionRow & { order_id: string; amount_paise: number };
 
 export async function listPendingPaymentLinks(): Promise<PendingLinkRow[]> {
   // Join to the source event (held via the decision -> event chain) to recover the
-  // order_id we need to re-check. payment-link actions are provisional (status
-  // 'pending', amount 0) until the linked payment actually captures.
+  // order_id AND the real amount we need to re-check/credit. payment-link actions are
+  // provisional (status 'pending', amount 0) until the linked payment captures.
   const res = await pool.query(
     `SELECT a.id, a.decision_id, a.status, a.amount_recovered_paise, a.executed_at, a.outcome_payload,
-            e.order_id
+            e.order_id, e.amount_paise
        FROM actions a
        JOIN decisions d ON d.id = a.decision_id
        JOIN events e ON e.id = d.event_id

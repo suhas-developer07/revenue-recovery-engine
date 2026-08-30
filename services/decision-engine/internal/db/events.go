@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -16,6 +17,7 @@ type Event struct {
 	OrderID     string
 	CustomerID  string
 	AmountPaise int64
+	ReceivedAt  time.Time
 	RawPayload  json.RawMessage
 }
 
@@ -23,10 +25,10 @@ type Event struct {
 func GetEvent(ctx context.Context, pool *pgxpool.Pool, id string) (Event, error) {
 	var e Event
 	err := pool.QueryRow(ctx,
-		`SELECT id, source, event_type, order_id, customer_id, amount_paise, raw_payload
+		`SELECT id, source, event_type, order_id, customer_id, amount_paise, received_at, raw_payload
 		 FROM events WHERE id = $1`,
 		id,
-	).Scan(&e.ID, &e.Source, &e.EventType, &e.OrderID, &e.CustomerID, &e.AmountPaise, &e.RawPayload)
+	).Scan(&e.ID, &e.Source, &e.EventType, &e.OrderID, &e.CustomerID, &e.AmountPaise, &e.ReceivedAt, &e.RawPayload)
 	return e, err
 }
 

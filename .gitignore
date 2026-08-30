@@ -3,5 +3,6 @@ node_modules/
 dist/
 .next/
 *.log
+*.tsbuildinfo
 services/*/tmp/
 .DS_Store

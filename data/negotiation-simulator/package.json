@@ -1,0 +1,18 @@
+{
+  "name": "negotiation-simulator",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "simulate": "npx tsx src/simulate.ts",
+    "simulate:cooperative": "npx tsx src/simulate.ts --persona=cooperative",
+    "simulate:hostile": "npx tsx src/simulate.ts --persona=hostile",
+    "simulate:cant_pay": "npx tsx src/simulate.ts --persona=cant_pay",
+    "simulate:evasive": "npx tsx src/simulate.ts --persona=evasive",
+    "simulate:stall": "npx tsx src/simulate.ts --persona=stall_then_pay"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.2",
+    "@types/node": "^22.5.0"
+  }
+}

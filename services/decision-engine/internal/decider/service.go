@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -96,7 +95,11 @@ func (s *Service) DecideAndPersist(ctx context.Context, classificationID string)
 		MandateStatus:    prefs.MandateStatus,
 		OptedOutChannels: toChannels(prefs.OptedOutChannels),
 		Timezone:         prefs.Timezone,
-		Now:              time.Now(),
+		// Use the event's received_at as the decision timestamp, not wall-clock
+		// time. This ensures synthetic batches with spread timestamps produce
+		// deterministic quiet-hours / AFA-window decisions regardless of when
+		// the batch is run — critical for reproducible demo numbers.
+		Now:              ev.ReceivedAt,
 	}
 
 	trace := policy.Decide(dc)

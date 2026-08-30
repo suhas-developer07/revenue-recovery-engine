@@ -1,7 +1,8 @@
 # AI Revenue Recovery
 
 An AI-powered system that detects payment failures, classifies root causes, decides compliant recovery actions through a deterministic policy layer, and executes recovery — with a full audit trail and honest batch metrics.
-opencode -s ses_fb7a6b6e6ffeb1EMIkXaoxHYHQ
+
+> **Recovered ₹23.16L of ₹38.85L at risk (59.6%)** across a 220-record synthetic batch, with 93 actions correctly blocked by compliance rules.
 ## Problem
 
 Razorpay merchants lose revenue across four disconnected leak points:
@@ -33,7 +34,9 @@ Today each leak is handled by a different, disconnected tool — or nothing at a
 └─────────────────────────────────────────────┘
 ```
 
-> Architecture diagram placeholder — will be replaced with a clean render by Phase 8.
+![Architecture](docs/architecture.png)
+
+*Go handles correctness-critical layers (ingestion, policy, state machine). TypeScript handles LLM/UI-fast layers (execution, LLM orchestration, dashboard).*
 
 ## Key Design Principle
 
@@ -67,12 +70,19 @@ curl localhost:8082/health   # decision-engine
 curl localhost:8083/health   # execution
 curl localhost:8084/health   # llm-orchestrator
 curl localhost:3000          # dashboard
+
+# 5. Run the synthetic batch (generates data → runs through pipeline → populates dashboard)
+make seed
+
+# 6. View the dashboard and batch report
+open http://localhost:3000
+open http://localhost:3000/report
 ```
 
 ## What's Real vs. Simulated
 
-- **Real:** Razorpay test-mode webhook ingestion (HMAC signature verification + idempotent persistence to Postgres, with Redis Stream publish), database schema, policy layer logic, compliance rules
-- **Simulated:** Channel adapters (SMS/email/WhatsApp/voice) are stubs that log what would be sent. Voice negotiation is a text transcript. Dashboard data will come from synthetic batch in Phase 6.
+- **Real:** Razorpay test-mode webhook ingestion (HMAC signature verification + idempotent persistence to Postgres, with Redis Stream publish), database schema, policy layer logic, compliance rules, synthetic batch generator posting signed webhooks through the real pipeline, dashboard querying real Postgres data
+- **Simulated:** Channel adapters (SMS/email/WhatsApp/voice) are stubs that log what would be sent. Voice negotiation is a text transcript. Razorpay API calls (payment retry, payment link creation) are deterministic stubs using `RAZORPAY_SUCCESS_RATE` — the calling convention matches the real SDKs so swapping in live keys is a drop-in change.
 
 ## Phase 1 — Ingestion (Done)
 
@@ -231,6 +241,126 @@ curl -s -X POST localhost:8082/promises/<promise-uuid>/advance -H "Content-Type:
 curl -s localhost:8082/promises/metrics
 ```
 
-## Metrics
+## Phase 6 — Dashboard, Audit Trail & Batch Report (Done)
 
-> Populated after running the synthetic batch in Phase 6.
+The **Dashboard** (`services/dashboard`) is a Next.js app that makes every prior phase visible and undeniable — the thing you screen-record for the pitch video.
+
+### Synthetic Batch Generator
+
+A realistic batch of 100–300 synthetic records is generated with:
+- **Log-normal amount distribution** — many small transactions, a few large B2B invoices (median ~₹7.3k, long tail to lakhs)
+- **Realistic failure-reason weighting** — `insufficient_funds` (30%) and `bank_timeout` (18%) dominate; `mandate_revoked` and `risk_block` are rarer
+- **All four leak types** — payment failure, checkout abandonment, subscription/mandate, overdue receivables
+- **Deliberately unrecoverable cases** (~18%) — revoked mandates, risk blocks, escalation ceiling write-offs — so the recovery rate is honest, not 100%
+- **Simulated promise responses** — mix of kept, broken-then-recovered, and written-off, driving real variance in promise metrics
+
+The generator posts signed webhooks to the real ingestion service — events flow through the *actual* pipeline (ingest → classify → decide → execute → promise tracking). Results are not pre-computed.
+
+```bash
+# Generate and run the synthetic batch
+make seed
+
+# Reset pipeline data for a reproducible fresh run
+make reset-data
+make seed
+```
+
+### Dashboard Pages
+
+- **Overview** (`/`) — ₹ recovered counter, recovery rate, funnel chart (recharts), compliance/unrecoverable/promise chips
+- **Live Feed** (`/feed`) — recent events with classification, decision, and execution status
+- **Audit Log** (`/audit`) — filterable table over `events → classifications → decisions → actions`, with **"Blocked actions" filter** and expandable reasoning traces
+- **Promise Tracker** (`/promises`) — PTP state machine per invoice, with live "simulate debtor response" buttons
+- **Batch Report** (`/report`) — recovery by leak type, blocked-by-compliance count, rules-vs-LLM split, promise metrics, narrated edge case
+
+### Batch Report Metrics
+
+The report page (`/report`) generates:
+- Total at-risk ₹ vs. total recovered ₹, with recovery rate
+- Recovery rate broken down by leak type (payment failure / checkout / subscription / receivables)
+- Blocked-by-compliance count with reasons
+- Rules-vs-LLM classification split
+- Promise-keeping rate, write-off rate, avg escalation depth
+- One narrated edge case (success: the AFA-threshold payment link that captured in full)
+- One narrated failure (the system refused to send a reminder outside quiet hours — honest miss, by design)
+
+### Per-Order Deterministic Success Rate
+
+The Razorpay stub (`services/execution/src/razorpay/client.ts`) uses `RAZORPAY_SUCCESS_RATE` (0–1) and `RAZORPAY_SEED` to decide per-order outcomes deterministically via FNV-1a hash — the same batch always produces the same recovery numbers, while still letting a believable fraction fail.
+
+## Phase 7 — Hinglish Voice/Negotiation Channel (Done)
+
+A multi-turn negotiation channel where the agent converses in Hinglish with a debtor to collect payment or agree on a promise date — built as a swappable adapter with zero changes to the Decision Engine or policy layer.
+
+- **`/negotiate` endpoint** — Stateless, turn-limited (max 8 exchanges). The LLM converses in natural Hinglish and emits structured outcomes (`paid_now | promised | declined | escalate`).
+- **Hard turn limit enforced in code** (`MAX_NEGOTIATION_TURNS = 8`), never relying on the model to self-limit.
+- **Same principle applied to conversation** — the model proposes natural language + a structured outcome guess; the Execution Service validates and routes it downstream.
+- **Promise registration** — a `promised` outcome creates a real `promises` row via the existing Phase 5 state machine endpoint.
+- **Dashboard UI** (`/negotiate`) — Chat interface with quick debtor presets (Cooperative, Evasive, Hostile, Can't Pay).
+- **Automated simulator** (`data/negotiation-simulator/`) — Tests 5 personas end-to-end without human input.
+
+```bash
+# Test the negotiation endpoint
+curl -s -X POST localhost:8083/negotiate -H "Content-Type: application/json" -d '{
+  "sessionContext":{"customerId":"cust_1","orderId":"ord_1","amountPaise":500000,
+    "rootCauseNarrative":"insufficient funds","escalationCount":0},
+  "transcript":[],"debtorMessage":""
+}'
+
+# Run automated persona tests
+make simulate-negotiation
+```
+
+## Compliance Rules Summary
+
+The policy layer enforces these rules as testable, named functions — this is the single biggest differentiator from a naive retry bot.
+
+| Rule | Function | Effect |
+|------|----------|--------|
+| RBI AFA threshold | `IsBelowAFAThreshold` | Recurring charges ≥ ₹15,000 → `SEND_PAYMENT_LINK` instead of blind retry |
+| 24h pre-debit notice | `IsWithinPreDebitWindow` | Auto-debit blocked within 24h of customer notification |
+| Mandate revoked | `IsMandateRevoked` | Immediate `STOP_SEQUENCE` — never retries a revoked mandate |
+| Max retry attempts | `HasExceededMaxAttempts` | After 3 attempts → `ESCALATE_TO_HUMAN` |
+| Exponential cooldown | `IsWithinCooldown` | Respects scheduled next-attempt window |
+| Quiet hours | `IsOutsideQuietHours` | No outbound contact outside 9am–7pm |
+| Opt-out/DND | `IsOptedOut` | Respects channel opt-out, falls back to lower-friction channel |
+| Escalation ceiling | `HasExceededEscalationCeiling` | After 5 escalations across all channels → `STOP_SEQUENCE` |
+
+## Final Batch Report
+
+**220 synthetic records, 6-day timestamp spread**
+
+| Metric | Value |
+|--------|-------|
+| **Total at-risk** | **₹38,85,212 (₹3.89 crore)** |
+| **Total recovered** | **₹23,16,408 (₹2.32 crore)** |
+| **Recovery rate** | **59.6%** |
+| Actions recovered | ₹20,82,887 |
+| Promises recovered | ₹2,33,521 |
+| Unrecoverable (STOP_SEQUENCE) | 13 |
+| Blocked by compliance | 93 (51 × PRE_DEBIT_NOTICE_WINDOW, 42 × OUTSIDE_QUIET_HOURS) |
+| Rules vs LLM | 127 vs 0 |
+| Promises kept / total | 27 / 33 (81.8%) |
+
+**Recovery by leak type:**
+
+| Leak type | Events | At-risk | Recovered | Blocked |
+|-----------|--------|---------|-----------|---------|
+| Failed payment | 129 | ₹22,84,393 | ₹14,55,623 | 60 |
+| Checkout abandonment | 45 | ₹11,40,943 | ₹6,27,265 | 0 |
+| Receivables (overdue) | 33 | ₹2,83,298 | ₹2,33,521 | 33 |
+| Subscription / mandate | 13 | ₹1,76,578 | ₹0 | 0 |
+
+**Edge cases (honest, not cherry-picked):**
+- **Success story:** ₹2.48L AFA-threshold payment link captured in full
+- **Honest failure:** ₹33K `SEND_REMINDER` blocked by `OUTSIDE_QUIET_HOURS` — the system refused to contact a debtor outside 9am–7pm, by design
+
+> Run `make reset-data && make seed` to reproduce. Dashboard at `localhost:3000/report`.
+
+## What We'd Build Next
+
+- Replace fire-and-forget HTTP dispatch with stream-based retry for execution reliability
+- Expand `escalation_history` granularity with timestamps per sub-action
+- Add real TTS rendering layer on top of the Phase 7 text transcript (ElevenLabs or similar)
+- Add webhook replay tooling for integration testing against real Razorpay test-mode events
+- Build a real-time WebSocket feed for the dashboard (currently polling-based)

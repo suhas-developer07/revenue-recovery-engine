@@ -4,7 +4,7 @@ export
 
 migrationPath=./migrations
 
-.PHONY: up down logs migrate reset-db test-go test-ts test seed explain fmt db-status db-up db-down db-reset db-create
+.PHONY: up down logs migrate reset-db reset-data test-go test-ts test seed simulate-negotiation explain fmt db-status db-up db-down db-reset db-create
 
 ## Bring up all services (Postgres, Redis, Go + TS services, dashboard)
 up:
@@ -28,6 +28,14 @@ migrate: db-up
 ## Nuke Postgres volume and re-apply from scratch (alias for db-reset)
 reset-db: db-reset
 
+## Wipe ONLY the pipeline's transactional data (events through promises + webhook
+## dedup) so a fresh synthetic batch is reproducible — leaves the schema and the
+## customer_preferences table intact. Direct psql TRUNCATE (goose reset is unreliable
+## here because the docker-init schema is authoritative).
+reset-data:
+	@docker compose exec postgres psql -U postgres -d revenue_recovery -c \
+		"TRUNCATE TABLE actions, promises, decisions, classifications, events, processed_webhook_ids RESTART IDENTITY CASCADE;"
+
 ## Run the Go policy test suite
 test-go:
 	cd services/decision-engine && go test ./... -v
@@ -41,7 +49,11 @@ test: test-go test-ts
 
 ## Generate and load the synthetic batch dataset through the running pipeline
 seed:
-	cd data/synthetic-batch-generator && npm run generate
+	cd data/synthetic-batch-generator && DATABASE_URL="postgres://postgres:postgres@localhost:5432/revenue_recovery?sslmode=disable" npm run generate
+
+## Run the automated negotiation simulator (tests all personas end-to-end)
+simulate-negotiation:
+	cd data/negotiation-simulator && EXECUTION_URL="http://localhost:8083" npx tsx src/simulate.ts
 
 ## Print the full reasoning trace for a given event ID (Phase 3's --explain mode)
 ## Requires the decision-engine container to be up and the DB reachable on localhost.

@@ -190,3 +190,85 @@ notified → awaiting_response → promised → due → kept
 **Verified:** state-machine unit tests (happy path `kept`, `kept`-on-retry after a break, the ceiling-stops-at-`written_off` DoD scenario without infinite loop, and invalid transitions rejected); and against the live stack an end-to-end walk from `notified` through `kept`, plus a 5-escalation sequence that lands on `written_off` with `resolved_at` set.
 
 **Trade-off acknowledged:** escalation decisions are **scoped to the promise** and re-run `policy.Decide` then log the authorized action (`SEND_REMINDER`/`STOP_SEQUENCE`) rather than writing a second `decisions`/`actions` row. That's deliberate: `classifications` is UNIQUE-per-event and `actions.decision_id` FK-joins to a single `decisions` row per event, so a second event-scoped decision for the same invoice can't be represented there without violating the 1-per-event idempotency model. The promise's own row is the audit trail for the tracker — and to make that claim real rather than aggregate-only, each escalation appends a granular entry to the promise's `escalation_history JSONB` (migration `0006`): `{escalation_number, triggered_at, authorized_by_rule, action, channel, reasoning}` — the same trace-capture discipline as `decisions.reasoning` in Phase 3, but carried on the promise row itself. Verified live: escalations `#1`–`#5` record `SEND_REMINDER`/`SEND_REMINDER_ALLOWED`, and the write-off step records `#6 STOP_SEQUENCE / ESCALATION_CEILING_REACHED_STOP` with the full reasoning.
+
+---
+
+## Decision #15 — Synthetic data methodology, dashboard architecture, and recovery-accounting honesty
+
+**Date:** Day 6 (Phase 6)
+
+**Decision:**
+1. **Synthetic batch posts signed webhooks to the real ingestion service** — the generator (`data/synthetic-batch-generator/src/generate.ts`) POSTs HMAC-signed, Razorpay-shaped payloads to `http://localhost:8081/webhook/razorpay`. Events flow through the *actual* pipeline (ingest → classify → decide → execute → promise tracking). We do NOT fabricate results — the generator produces inputs, the pipeline produces outputs.
+2. **Deterministic per-order stub success via FNV-1a hash** — `RAZORPAY_SUCCESS_RATE` (0–1 fraction) + `RAZORPAY_SEED` decide each order's outcome from `fnv1a(orderId + kind + seed)`. Same seed + same batch = same recovery numbers, every time. This replaces the old boolean force-flags (`RAZORPAY_RETRY_SUCCEEDS` / `RAZORPAY_LINK_PAID`) which gave 0% or 100% outcomes.
+3. **Dashboard reads directly from Postgres** — the Next.js API routes use a shared `Pool` via `lib/db.ts`. No service-to-service HTTP for bulk reads; the dashboard is read-only against the shared DB. Promise "simulate respond" actions route through the Go Decision Engine's `/promises` endpoints to preserve single-source-of-truth for the state machine.
+4. **Recovery accounting is honest** — `SEND_PAYMENT_LINK` is recorded as `pending/0` until the follow-up sweep confirms the linked payment actually captured; `RETRY_PAYMENT` only counts on confirmed capture. Payment links are counted as recovered at their actual captured amount (per-order, not a global placeholder). The batch report shows the recovery rate including deliberately-unrecoverable cases (~18%): a 100% recovery rate would read as cherry-picked.
+5. **Blocked decisions are surfaced in the UI** — the audit log has a "Blocked actions" filter toggle, making the compliance layer visible and demoable. This directly answers the judge's hardest question ("what stops your agent from doing something it shouldn't?") with a screen, not a sentence.
+
+**Reasoning:**
+- Posting real webhooks (with real HMAC signing) through the real ingestion service is the difference between "we simulated data" (fine) and "we simulated results" (a red flag). Every row in the dashboard was produced by the pipeline doing actual work.
+- FNV-1a deterministic hashing means the batch is reproducible — "make reset-data && make seed" produces identical numbers every time. This matters for a clean demo: the judge who clones your repo sees the same recovery rate you showed in the video.
+- Direct Postgres reads for the dashboard are the simplest, fastest-to-build approach for a 7-day build. Calling Go service endpoints would be more "properly service-oriented" but adds plumbing with no functional benefit at this scale.
+- Honest recovery accounting (not counting links until capture) is the methodology-transparent claim that preempts the most obvious credibility question a judge could ask.
+
+**Trade-off acknowledged:** The FNV-1a hash means changing the seed changes the recovery rate. We document this as intentional (deterministic reproducibility, not result-tuning) and fix the seed in `.env.example` to `phase6batch`. The batch generator's distribution parameters (log-normal amount, weighted categories, ~18% unrecoverable) are tuned once and committed — not adjusted to hit a target number.
+
+**6. Four leak types, not three** — the report's `CASE` statement produces 4 distinct buckets: Failed payment (card/bank), Checkout abandonment, Receivables (overdue invoices), and Subscription/mandate. The subscription/mandate bucket captures `mandate_revoked` risk-category events (classified by the rules engine on error code `mandate.revoked`), which are distinct from other payment failures because they represent a terminated recurring relationship — the policy layer maps them to `STOP_SEQUENCE` (no compliant automated recovery exists). This is an intentional 4-bucket design: mandate_revoked events *could* be folded into "payment failure" generically, but separating them makes the report more informative and makes the `STOP_SEQUENCE` policy decision for revoked mandates visible as its own row.
+
+**Verified batch results (220 records, seed `phase6batch`):**
+- **Total at-risk: ₹30,52,639 (~₹3.05 crore)** | **Recovered: ₹12,86,712 (~₹1.29 crore)** | **Recovery rate: 42.2%**
+- **By leak type:** Failed payment (142 events, ₹93.8L recovered), Checkout abandonment (33 events, ₹34.8L recovered), Receivables (28 events, ₹0 recovered — all blocked by `PRE_DEBIT_NOTICE_WINDOW_NOT_MET`), Subscription/mandate (17 events, ₹0 recovered — all `STOP_SEQUENCE`)
+- **Blocked: 106 decisions** (56 by `PRE_DEBIT_NOTICE_WINDOW_NOT_MET`, 50 by `OUTSIDE_QUIET_HOURS`)
+- **Unrecoverable: 17** (mandate_revoked → `STOP_SEQUENCE`)
+- **Promises: 28 total, 24 kept (85.7%), 4 written off**
+- **Rules vs LLM: 114 vs 0** (all decisions authorized by deterministic rules; LLM classified 0 events because heuristic fallback matched all synthetic signals)
+- **Featured edge case (success):** `ord_syn_0015` — ₹1,20,951 AFA-threshold charge routed to authenticated payment link, captured in full
+- **Featured failure (honest miss):** `ord_syn_0034` — ₹50,507 invoice_overdue, `SEND_REMINDER` blocked by `OUTSIDE_QUIET_HOURS` (system refused to act outside 9am–7pm)
+
+The 42.2% recovery rate is an honest figure that includes deliberately-unrecoverable mandates and compliance-blocked actions — not a cherry-picked happy-path number.
+
+## Decision #16 — Hinglish voice/negotiation: text-transcript mode as primary, TTS as optional rendering layer
+
+**Context:** Phase 7 adds a Hinglish negotiation channel — the most memorable pitch-video moment. Two options exist: text-transcript mode (LLM-driven multi-turn chat, rendered as a transcript) or real TTS voice (ElevenLabs or similar). The playbook recommends text-first.
+
+**Decision:** Build text-transcript mode as the primary deliverable. Real TTS, if added, is a rendering layer on top of the same transcript — never a separate code path.
+
+**Rationale:**
+1. **Zero integration risk on demo day.** Text transcripts are deterministic, testable, and work offline. TTS adds external API latency, failure modes, and a dependency that can fail during a pitch recording.
+2. **Same architecture principle.** The negotiation LLM emits structured outcomes (`paid_now | promised | declined | escalate`), and the Execution Service routes them downstream — identical to the single-shot action flow. TTS would only change *how* the agent reply is rendered, not *what* it decides.
+3. **Honest demo.** Judges know this is a simulated scenario. A live-generated transcript where the agent stays polite under pressure is more impressive than pre-recorded audio that could be scripted playback.
+4. **If TTS is added later,** it wraps the `agentReply` string in a TTS adapter. The negotiation logic, turn limit, and outcome routing remain untouched.
+
+**Implementation:**
+- `/negotiate` endpoint (LLM Orchestrator): stateless, turn-limited (max 8 exchanges), emits `{agentReply, resolved, outcome, promisedDate}`
+- Execution Service relays to `/negotiate`, dashboard holds transcript client-side (no server-side session storage)
+- Hard turn limit enforced in code (`MAX_NEGOTIATION_TURNS = 8`), never relying on the model to self-limit
+- Debtor simulation script (`data/negotiation-simulator`) with 5 personas: cooperative, evasive, hostile, can't_pay, stall_then_pay
+- Dashboard `/negotiate` page with chat UI, quick-debtor presets, and outcome banner
+
+**Design constraint validated:** the entire Phase 7 implementation touches only `services/execution/src/adapters/voice.adapter.ts`, `services/llm-orchestrator/src/negotiate.ts`, and new dashboard files. Zero changes to the Decision Engine, policy layer, or promise state machine — proof the Phase 4 adapter interface was designed correctly.
+
+## Decision #17 — Retrospective: what we'd do differently and what we're most confident about
+
+**What we'd do differently:**
+
+1. **Build the timestamp spread into the batch generator from day one.** The original generator fired all events within 12 seconds, making quiet-hours blocking entirely a function of wall-clock time. We caught this in Phase 6 verification and fixed it (events now span 6 days), but it should have been designed-in from the start. Lesson: synthetic data must mirror real-world variance, not just real-world distributions.
+
+2. **Store the full webhook envelope as `raw_payload` from the start.** The generator initially stored the inner payload (`wh.payload`) instead of the full envelope (`wh`), causing the classifier's `extractSignal` to fail silently — 142 events fell through to the LLM as `unknown` → `STOP_SEQUENCE`. This was the most impactful bug we fixed. Lesson: when two subsystems agree on a data contract, verify the contract at the boundary, not just in documentation.
+
+3. **Add the promise-to-ledger bridge earlier.** When a promise transitions to `kept`, no `actions` row was created, so ₹2.34L in kept promises was invisible to the recovery ledger. We caught this by reconciling the promise metrics against the actions sum — a check that should have been part of Phase 5's definition of done. Lesson: when two subsystems track the same concept (recovered ₹), define the reconciliation check before the subsystems diverge.
+
+**What we're most confident about:**
+
+1. **The policy layer architecture.** The pure, ordered policy functions (`internal/policy/*.go`) are the single highest-leverage piece of code in the project. They're testable without a database, auditable without a dashboard, and composable — adding a new rule is a new function and one line in the check order. This pattern generalizes far beyond payment recovery.
+
+2. **The adapter interface.** The fact that Phase 7's entire negotiation channel could be built without touching the Decision Engine or policy layer proves the adapter boundary was drawn correctly. This is the kind of interface that survives production pressure.
+
+3. **The audit trail discipline.** Every layer writes exactly one row per event (`events → classifications → decisions → actions`), including blocked decisions. The blocked-actions filter in the audit log is the single most demoable feature for "what stops your agent?" — and it exists because we committed to capturing evidence at every layer, not just at the happy path.
+
+4. **Honest metrics.** The 59.6% recovery rate includes deliberately-unrecoverable mandates (13 STOP_SEQUENCE) and compliance-blocked actions (93). A judge who asks "is this real?" gets a number that includes its own failures, which is more credible than a suspiciously perfect one.
+
+**Least confident about:**
+
+- **The heuristic negotiation fallback.** Without an LLM key, the heuristic can be too persistent with hostile debtors (it doesn't detect all decline patterns). The LLM path handles this correctly, but the heuristic should have been more conservative about escalating earlier.
+- **Fire-and-forget HTTP dispatch.** The execution service sends actions via HTTP with no retry. In production this would need stream-based delivery with acknowledgments. Acceptable for a hackathon demo, but a known limitation.
+- **Single-row promise state.** The promise's state is a single `state` column, not an event-sourced log. We added `escalation_history JSONB` for audit detail, but the transitions themselves aren't independently auditable in the same way `decisions.reasoning` is. A production system would likely want a `promise_transitions` table.

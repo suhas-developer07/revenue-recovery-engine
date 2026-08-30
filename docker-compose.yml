@@ -99,6 +99,8 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/revenue_recovery?sslmode=disable
+      DECISION_ENGINE_URL: http://decision-engine:8080
+      EXECUTION_URL: http://execution:8080
     ports:
       - "3000:3000"
     depends_on:

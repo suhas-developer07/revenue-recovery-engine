@@ -3,6 +3,7 @@ import { RecoveryActionSchema, RecoveryAction } from "./schema/action";
 import * as db from "./db/pg";
 import { runHandler } from "./handlers";
 import { razorpayClient } from "./razorpay/client";
+import { negotiateTurn, NegotiateSessionContext, TranscriptTurn } from "./adapters/voice.adapter";
 
 const app = express();
 app.use(express.json());
@@ -14,7 +15,7 @@ async function paymentLinkFollowUpSweep() {
   try {
     const pending = await db.listPendingPaymentLinks();
     for (const row of pending) {
-      const check = await razorpayClient.checkPaymentLinkPayment(row.order_id);
+      const check = await razorpayClient.checkPaymentLinkPayment(row.order_id, row.amount_paise);
       if (check.paid && check.amount_captured_paise > 0) {
         await db.confirmPaymentLink(row.id, check.amount_captured_paise, {
           kind: "payment_link",
@@ -96,6 +97,44 @@ app.post("/execute", async (req, res) => {
   } catch (err: any) {
     console.error("[execution] handler error:", err?.message ?? err);
     res.status(500).json({ error: "execution failed", detail: String(err?.message ?? err) });
+  }
+});
+
+// Phase 7 — /negotiate endpoint. Stateless negotiation relay.
+// The dashboard sends the full transcript each turn; this endpoint
+// forwards to the LLM Orchestrator and returns the agent's reply.
+// On terminal outcomes, the dashboard handles downstream routing.
+app.post("/negotiate", async (req, res) => {
+  const { sessionContext, transcript, debtorMessage } = req.body ?? {};
+
+  if (
+    !sessionContext ||
+    typeof sessionContext.customerId !== "string" ||
+    typeof sessionContext.orderId !== "string" ||
+    typeof sessionContext.amountPaise !== "number"
+  ) {
+    res.status(400).json({ error: "sessionContext with customerId, orderId, amountPaise is required" });
+    return;
+  }
+
+  const context: NegotiateSessionContext = {
+    customerId: sessionContext.customerId,
+    orderId: sessionContext.orderId,
+    amountPaise: sessionContext.amountPaise,
+    rootCauseNarrative: sessionContext.rootCauseNarrative ?? "",
+    escalationCount: sessionContext.escalationCount ?? 0,
+  };
+
+  try {
+    const result = await negotiateTurn(
+      context,
+      (Array.isArray(transcript) ? transcript : []) as TranscriptTurn[],
+      typeof debtorMessage === "string" ? debtorMessage : "",
+    );
+    res.json(result);
+  } catch (err: any) {
+    console.error("negotiate error:", err?.message ?? err);
+    res.status(500).json({ error: "negotiation failed", detail: String(err?.message ?? err) });
   }
 });
 

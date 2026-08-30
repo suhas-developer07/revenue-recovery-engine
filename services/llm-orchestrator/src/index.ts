@@ -2,6 +2,7 @@ import express from "express";
 
 import { classifyEvent } from "./classify";
 import { draftMessage } from "./draft";
+import { negotiate, NegotiateRequest } from "./negotiate";
 
 const app = express();
 app.use(express.json());
@@ -10,7 +11,7 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok", service: "llm-orchestrator" });
 });
 
-// Phase 2 — LLM classification fallback for the Decision Engine's rules engine.
+//LLM classification fallback for the Decision Engine's rules engine.
 // Input: event_type + compact signal text. Output: a valid, enum-constrained
 // risk_category + narrative + confidence. Falls back to a deterministic heuristic
 // when no ANTHROPIC_API_KEY is configured.
@@ -30,7 +31,7 @@ app.post("/classify", async (req, res) => {
   }
 });
 
-// Phase 4 — LLM message drafting for an ALREADY-AUTHORIZED, ALREADY-TARGETED
+// LLM message drafting for an ALREADY-AUTHORIZED, ALREADY-TARGETED
 // customer-facing action. The LLM only words the message; it never decides whether
 // or who to contact. Tight input, tight output, heuristic fallback without a key.
 app.post("/draft", async (req, res) => {
@@ -56,6 +57,46 @@ app.post("/draft", async (req, res) => {
   } catch (err: any) {
     console.error("draft error:", err);
     res.status(500).json({ error: "draft failed" });
+  }
+});
+
+// /negotiate. Stateless multi-turn negotiation endpoint.
+// All context comes in on every call — no server-side session storage.
+// The LLM converses in Hinglish and emits a structured outcome that
+// the Execution Service routes downstream.
+app.post("/negotiate", async (req, res) => {
+  const { sessionContext, transcript, debtorMessage } = req.body ?? {};
+
+  if (
+    !sessionContext ||
+    typeof sessionContext.customerId !== "string" ||
+    typeof sessionContext.orderId !== "string" ||
+    typeof sessionContext.amountPaise !== "number"
+  ) {
+    res.status(400).json({
+      error: "sessionContext with customerId, orderId, and amountPaise is required",
+    });
+    return;
+  }
+
+  const negotiateReq: NegotiateRequest = {
+    sessionContext: {
+      customerId: sessionContext.customerId,
+      orderId: sessionContext.orderId,
+      amountPaise: sessionContext.amountPaise,
+      rootCauseNarrative: sessionContext.rootCauseNarrative ?? "",
+      escalationCount: sessionContext.escalationCount ?? 0,
+    },
+    transcript: Array.isArray(transcript) ? transcript : [],
+    debtorMessage: typeof debtorMessage === "string" ? debtorMessage : "",
+  };
+
+  try {
+    const result = await negotiate(negotiateReq);
+    res.json(result);
+  } catch (err: any) {
+    console.error("negotiate error:", err);
+    res.status(500).json({ error: "negotiation failed" });
   }
 });
 
