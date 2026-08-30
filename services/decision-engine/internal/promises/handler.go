@@ -53,15 +53,16 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	out := make([]map[string]interface{}, 0, len(ps))
 	for _, p := range ps {
 		out = append(out, map[string]interface{}{
-			"id":               p.ID,
-			"event_id":         p.EventID,
-			"state":            p.State,
-			"promised_date":    p.PromisedDate,
-			"escalation_count": p.EscalationCount,
-			"responded_at":     p.RespondedAt,
-			"resolved_at":      p.ResolvedAt,
-			"created_at":       p.CreatedAt,
-			"updated_at":       p.UpdatedAt,
+			"id":                 p.ID,
+			"event_id":           p.EventID,
+			"state":              p.State,
+			"promised_date":      p.PromisedDate,
+			"escalation_count":   p.EscalationCount,
+			"escalation_history": p.EscalationHistory,
+			"responded_at":       p.RespondedAt,
+			"resolved_at":        p.ResolvedAt,
+			"created_at":         p.CreatedAt,
+			"updated_at":         p.UpdatedAt,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)

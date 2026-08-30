@@ -86,6 +86,7 @@ CREATE TABLE promises (
   state TEXT NOT NULL DEFAULT 'notified'
     CHECK (state IN ('notified', 'awaiting_response', 'promised', 'due', 'kept', 'broken', 're_escalated', 'written_off')),
   escalation_count INT NOT NULL DEFAULT 0,
+  escalation_history JSONB NOT NULL DEFAULT '[]',
   responded_at TIMESTAMPTZ,
   resolved_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),

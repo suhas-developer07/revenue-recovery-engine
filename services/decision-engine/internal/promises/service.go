@@ -59,14 +59,13 @@ func (s *Service) Transition(ctx context.Context, id string, trigger statemachin
 	return res.State, nil
 }
 
-// escalate re-runs the Phase 3 policy gate for a broken promise and logs the
-// authorized action: a firming SEND_REMINDER while re-escalating, or a STOP_SEQUENCE
-// once the escalation ceiling (policy.DefaultEscalationCeiling) is exhausted — the
-// same guardrail that halts payment-retry sequences. The promise's own row (state,
-// escalation_count, resolved_at) is the audit trail here: escalation decisions are
-// scoped to the promise, not to the event's single actions/decisions row (which are
-// 1-per-event by design), so we re-authorize through policy.Decide and log rather
-// than fabricate a second decision row for the same event.
+// escalate re-runs the Phase 3 policy gate for a broken promise and records a
+// granular escalation-history entry: a firming SEND_REMINDER while re-escalating,
+// or a STOP_SEQUENCE once the escalation ceiling (policy.DefaultEscalationCeiling)
+// is exhausted — the same guardrail that halts payment-retry sequences. Each entry
+// is appended to the promise's own escalation_history JSONB (Phase 3's
+// trace-capture discipline, scoped to the promise), so escalation decisions are
+// auditable without fabricating a second 1-per-event decisions/actions row.
 func (s *Service) escalate(ctx context.Context, eventID string, escalationCount int, reEscalating bool) {
 	ev, err := db.GetEvent(ctx, s.Pool, eventID)
 	if err != nil {
@@ -86,6 +85,21 @@ func (s *Service) escalate(ctx context.Context, eventID string, escalationCount 
 	}
 	trace := policy.Decide(dc)
 
+	// Find the promise id for this event so we can append to its history.
+	pid, err := s.promiseIDForEvent(ctx, ev.ID)
+	if err != nil {
+		slog.Warn("promise escalation: promise lookup failed", "error", err, "event_id", ev.ID)
+		return
+	}
+	_ = db.AppendEscalation(ctx, s.Pool, pid, db.EscalationEntry{
+		EscalationNumber: escalationCount + 1,
+		TriggeredAt:      time.Now().UTC().Format(time.RFC3339),
+		AuthorizedByRule: trace.AuthorizedByRule,
+		Action:           string(trace.FinalAction),
+		Channel:          string(trace.FinalChannel),
+		Reasoning:        trace.Reasoning,
+	})
+
 	slog.Info("promise escalation decided",
 		"event_id", ev.ID,
 		"escalation_count", escalationCount,
@@ -96,4 +110,19 @@ func (s *Service) escalate(ctx context.Context, eventID string, escalationCount 
 }
 func (s *Service) List(ctx context.Context) ([]db.Promise, error) {
 	return db.ListPromises(ctx, s.Pool)
+}
+
+// promiseIDForEvent resolves the promise row id for an event. A promise is created
+// per overdue-invoice event (one promise per event), so this is a single look-up.
+func (s *Service) promiseIDForEvent(ctx context.Context, eventID string) (string, error) {
+	ps, err := s.List(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, p := range ps {
+		if p.EventID == eventID {
+			return p.ID, nil
+		}
+	}
+	return "", db.ErrPromiseNotFound
 }
