@@ -82,15 +82,18 @@ CREATE INDEX idx_actions_status ON actions(status);
 CREATE TABLE promises (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   event_id UUID NOT NULL REFERENCES events(id),
-  promised_date DATE NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'kept', 'broken', 'written_off')),
+  promised_date DATE,
+  state TEXT NOT NULL DEFAULT 'notified'
+    CHECK (state IN ('notified', 'awaiting_response', 'promised', 'due', 'kept', 'broken', 're_escalated', 'written_off')),
   escalation_count INT NOT NULL DEFAULT 0,
+  responded_at TIMESTAMPTZ,
+  resolved_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX idx_promises_event_id ON promises(event_id);
-CREATE INDEX idx_promises_status ON promises(status);
+CREATE INDEX idx_promises_state ON promises(state);
 
 -- ============================================================
 -- CUSTOMER PREFERENCES: opt-outs, mandate status

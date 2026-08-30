@@ -17,6 +17,7 @@ import (
 	"github.com/suhas-developer07/revenue-recovery-engine/services/decision-engine/internal/decider"
 	"github.com/suhas-developer07/revenue-recovery-engine/services/decision-engine/internal/dispatch"
 	"github.com/suhas-developer07/revenue-recovery-engine/services/decision-engine/internal/llm"
+	"github.com/suhas-developer07/revenue-recovery-engine/services/decision-engine/internal/promises"
 	"github.com/suhas-developer07/revenue-recovery-engine/services/decision-engine/internal/queue"
 )
 
@@ -186,6 +187,11 @@ func main() {
 			"authorized_by_rule": trace.AuthorizedByRule,
 		})
 	})
+
+	// Promise-to-pay tracker: create/list, live "simulate debtor response", generic
+	// transition triggers, and the Section 6 metrics view.
+	promHandler := &promises.Handler{Svc: &promises.Service{Pool: pool}}
+	r.Mount("/promises", promHandler.Routes())
 
 	// Explain endpoint: returns the stored (accumulated) decision trace as JSON.
 	r.Get("/decisions/{eventID}/explain", func(w http.ResponseWriter, r *http.Request) {

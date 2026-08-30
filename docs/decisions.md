@@ -164,3 +164,29 @@
 
 **Trade-off acknowledged:** synchronous HTTP dispatch (chosen over a `new_decisions` Redis stream for this project's scale) means the Execution service is on the decision's critical path; the non-fatal, logged dispatch keeps a down execution service from corrupting the decision ledger, though a separate sweep would be needed to (re)dispatch actions decided while execution was down.
 
+
+## Decision #14 — Promise-to-pay tracker: a pure state machine in Go, `state` as the single source of truth, single-row-with-timestamps (no event-sourced transition log)
+
+**Date:** Day 5  
+**Decision:** The Phase 4 `LOG_PROMISE_TO_PAY` thin pass-through is promoted into a real state machine that lives in the **Go decision-engine**, not the TS execution service:
+
+```
+notified → awaiting_response → promised → due → kept
+                │ (timeout)                 └→ broken → re_escalated → (loop → awaiting_response)
+                └→ re_escalated                             └→ written_off  (ceiling reached → STOP_SEQUENCE)
+```
+
+- **Pure transition logic** (`internal/statemachine`): a table of `(state, trigger) → state` with no DB access — the same discipline as the Phase 3 policy functions. A `broken` promise is resolved through a fork that calls `policy.HasExceededEscalationCeiling` (Phase 3's exact guardrail): under the ceiling → `re_escalated` (and increments `escalation_count`), at/over it → `written_off`.
+- **Single source of truth:** the legacy 4-value `status` column is **folded into `state`** (8 values) and dropped. There is no second column that could drift out of sync; `ApplyTransition` is a single `UPDATE` that moves `state` and its derived fields (`responded_at`, `resolved_at`, `escalation_count`, `updated_at`) together.
+- **Single-row-with-timestamps, not an event-sourced transition log:** current state plus `created_at / updated_at / responded_at / resolved_at` on the one `promises` row is sufficient to compute every Section 6 metric (time-to-promise = `responded_at - created_at`; escalation depth = `escalation_count` distribution; promise-keeping & write-off rates = counts by terminal state). A `promise_transitions` table would be a second, redundant record of the same facts — complexity without metric value for this build.
+- **Reused, not re-built:** the escalation branch re-runs `policy.Decide` with the promise's `escalation_count`, so the *same* propose→check→authorize/block flow (and ceiling) that stops payment retries also stops a receivables-chasing sequence. Verified live: `SEND_REMINDER` is authorized for escalations 0–4, then flips to `STOP_SEQUENCE (ESCALATION_CEILING_REACHED_STOP)` at count 5 — the sequence terminates at `written_off`, never looping.
+- **Live demo path:** a `POST /promises/{id}/respond {promised_date}` endpoint simulates the debtor typing "I'll pay by <date>", and `POST /promises/{id}/advance {trigger}` walks the rest of the lifecycle. `GET /promises/metrics` exposes the aggregates.
+
+**Reasoning:**
+- State-machine rules are exactly the "must never be wrong" logic Go owns in this repo, and the `broken` transition needs `HasExceededEscalationCeiling` directly — no network hop to the TS layer.
+- Folding `status` into `state` is the zero-drift choice; keeping both in sync is the failure mode the phase explicitly warns about.
+- For a 7-day build the metrics are all derivable from timestamped states; an event log would be "impressive but not required" cost (the phase's own guidance).
+
+**Verified:** state-machine unit tests (happy path `kept`, `kept`-on-retry after a break, the ceiling-stops-at-`written_off` DoD scenario without infinite loop, and invalid transitions rejected); and against the live stack an end-to-end walk from `notified` through `kept`, plus a 5-escalation sequence that lands on `written_off` with `resolved_at` set.
+
+**Trade-off acknowledged:** escalation decisions are **scoped to the promise** and re-run `policy.Decide` then log the authorized action (`SEND_REMINDER`/`STOP_SEQUENCE`) rather than writing a second `decisions`/`actions` row. That's deliberate: `classifications` is UNIQUE-per-event and `actions.decision_id` FK-joins to a single `decisions` row per event, so a second event-scoped decision for the same invoice can't be represented there without violating the 1-per-event idempotency model. The promise's own row is the audit trail for the tracker.

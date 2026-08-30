@@ -196,6 +196,41 @@ docker exec -it revenue-recovery-postgres psql -U postgres -d revenue_recovery \
 
 The full pipeline is automatic: a signed webhook → ingested → classified → decided → dispatched → executed, with each layer leaving its own evidence row (`events` → `classifications` → `decisions` → `actions`).
 
+## Phase 5 — Promise-to-Pay Tracker & Escalation (Done)
+
+The **B2B receivables spine**: overdue invoices for which a human debtor replies "I'll pay by <date>" get tracked through a real state machine, checked when the date arrives, and escalated — or written off — with the same guardrail that stops payment retries. The state machine lives in the **Go decision-engine** (not the TS execution service), since its transitions need Phase 3's `HasExceededEscalationCeiling` directly.
+
+```
+notified → awaiting_response → promised → due → kept
+                │ (timeout)                 └→ broken → re_escalated → (loop → awaiting_response)
+                └→ re_escalated                             └→ written_off  (ceiling reached → STOP_SEQUENCE)
+```
+
+- **Pure, inspectable transitions** (`services/decision-engine/internal/statemachine`) — a `(state, trigger) → state` table with no DB access, mirroring the Phase 3 policy-function discipline. A `broken` promise forks through `policy.HasExceededEscalationCeiling`: under the ceiling → `re_escalated` (+ `escalation_count`), at/over it → `written_off`. The same guardrail layer that halts payment retries halts this sequence too.
+- **`state` is the single source of truth** — the legacy 4-value `status` column is folded into the 8-value `state` column and dropped (migration `0005`), so there is no second field that can drift. `ApplyTransition` is one `UPDATE` moving `state`, `responded_at`, `resolved_at`, `escalation_count` together.
+- **Single-row-with-timestamps, not an event log** — current state + `created_at/updated_at/responded_at/resolved_at` on the one `promises` row already computes every metric; a `promise_transitions` table would be redundant. Rationale in `docs/decisions.md` #14.
+- **Live "simulate debtor response" path** — `POST /promises/{id}/respond {promised_date}` acts as the debtor typing back a date; `POST /promises/{id}/advance {trigger}` walks the rest of the lifecycle (`request_response | date_arrives | paid | not_paid | timeout`).
+- **Promote the Phase 4 thin handler** — the Execution `LOG_PROMISE_TO_PAY` handler now registers the promise in the decision-engine tracker (via `DECISION_ENGINE_URL`) instead of only writing an audit row.
+- **Reusable escalation** — on each break the tracker re-runs `policy.Decide` with the promise's `escalation_count`: `SEND_REMINDER` escalations 0–4, then `STOP_SEQUENCE (ESCALATION_CEILING_REACHED_STOP)` at 5.
+
+Verify it:
+
+```bash
+# Register an overdue invoice as a promise (starts in 'notified')
+curl -s -X POST localhost:8082/promises -H "Content-Type: application/json" -d '{"event_id":"<event-uuid>"}'
+
+# Simulate the debtor responding with a promised date (the live-demo button)
+curl -s -X POST localhost:8082/promises/<promise-uuid>/respond \
+  -H "Content-Type: application/json" -d '{"promised_date":"2026-09-05"}'
+
+# Walk the lifecycle: date arrives -> not paid -> broken -> confirm -> re-escalated (or written_off)
+curl -s -X POST localhost:8082/promises/<promise-uuid>/advance -H "Content-Type: application/json" -d '{"trigger":"date_arrives"}'
+curl -s -X POST localhost:8082/promises/<promise-uuid>/advance -H "Content-Type: application/json" -d '{"trigger":"not_paid"}'
+
+# Section 6 metrics (promise-keeping rate, time-to-promise, escalation depth, write-off rate)
+curl -s localhost:8082/promises/metrics
+```
+
 ## Metrics
 
 > Populated after running the synthetic batch in Phase 6.

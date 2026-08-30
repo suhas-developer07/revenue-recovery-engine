@@ -75,6 +75,7 @@ services:
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/revenue_recovery?sslmode=disable
       LLM_ORCHESTRATOR_URL: http://llm-orchestrator:8080
+      DECISION_ENGINE_URL: http://decision-engine:8080
     ports:
       - "8083:8080"
     depends_on:

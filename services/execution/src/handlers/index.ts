@@ -12,6 +12,25 @@ const whatsapp = new WhatsAppAdapter();
 const voice = new VoiceAdapter();
 
 const LLM_ORCHESTRATOR_URL = process.env.LLM_ORCHESTRATOR_URL || "http://localhost:8084";
+const DECISION_ENGINE_URL = process.env.DECISION_ENGINE_URL || "";
+
+async function registerPromise(
+  eventId: string
+): Promise<{ promise_id: string } | null> {
+  if (!DECISION_ENGINE_URL) return null;
+  try {
+    const resp = await fetch(`${DECISION_ENGINE_URL}/promises`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ event_id: eventId }),
+    });
+    if (!resp.ok) return null;
+    const data = (await resp.json()) as { id?: string };
+    return data.id ? { promise_id: data.id } : null;
+  } catch {
+    return null;
+  }
+}
 
 export type HandlerOutcome = {
   status: "success" | "failed" | "pending";
@@ -177,15 +196,20 @@ export async function runHandler(input: DispatchInput): Promise<HandlerOutcome> 
     }
 
     case "LOG_PROMISE_TO_PAY": {
-      // Thin pass-through: Phase 5 promotes this into a real promises row. For now,
-      // record the audit row so the intent is visible and countable.
+      // Phase 5: the state machine lives in the Decision Engine. Register the
+      // promise there (created in 'notified'); the tracker then drives it through
+      // scheduled_response -> promised -> ... via the /promises endpoints.
+      const registered = await registerPromise(event_id);
       return {
         status: "success",
         amount_recovered_paise: 0,
         outcome_payload: {
           kind: "promise_to_pay",
           order_id: orderId,
-          note: "promise-to-pay recorded; Phase 5 promotes this into the promises state machine",
+          promise_id: registered?.promise_id ?? null,
+          note: registered
+            ? "promise registered in decision-engine state machine"
+            : "promise registration unavailable; audit row recorded only",
         },
       };
     }
