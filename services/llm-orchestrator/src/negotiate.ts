@@ -1,4 +1,4 @@
-import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import { z } from "zod";
 
 /**
@@ -46,7 +46,7 @@ const outcomeSchema = z.object({
 });
 
 /**
- * Deterministic heuristic negotiation — used when no ANTHROPIC_API_KEY is set.
+ * Deterministic heuristic negotiation — used when no GROQ_API_KEY is set.
  * Plays a scripted 3-turn negotiation that ends in "promised" with a date.
  */
 export function heuristicNegotiate(req: NegotiateRequest): NegotiateResponse {
@@ -132,7 +132,7 @@ export function heuristicNegotiate(req: NegotiateRequest): NegotiateResponse {
   }
 
   return {
-    agentReply: `Yeh aapka ${req.sessionContext.escalationCount + 1} follow-up hai. Hum aapko方便 dena chahte hain — kya aap ek specific date bata sakte hain? Agar nahi toh hum aapke case ko escalate kar denge.`,
+    agentReply: `Yeh aapka ${req.sessionContext.escalationCount + 1} follow-up hai. Hum aapko dena chahte hain — kya aap ek specific date bata sakte hain? Agar nahi toh hum aapke case ko escalate kar denge.`,
     resolved: false,
     turnNumber,
     maxTurns: MAX_NEGOTIATION_TURNS,
@@ -163,8 +163,13 @@ The outcome is your best guess at the conversation state. The system will valida
 
 Always output your reply FIRST, then the JSON on the next line.`;
 
-const anthropic = process.env.ANTHROPIC_API_KEY
-  ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+const GROQ_MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
+
+const groq = process.env.GROQ_API_KEY
+  ? new OpenAI({
+      apiKey: process.env.GROQ_API_KEY,
+      baseURL: "https://api.groq.com/openai/v1",
+    })
   : null;
 
 /**
@@ -187,7 +192,7 @@ export async function negotiate(req: NegotiateRequest): Promise<NegotiateRespons
     };
   }
 
-  if (!anthropic) {
+  if (!groq) {
     return heuristicNegotiate(req);
   }
 
@@ -195,9 +200,12 @@ export async function negotiate(req: NegotiateRequest): Promise<NegotiateRespons
   const remainingTurns = MAX_NEGOTIATION_TURNS - turnNumber;
 
   // Build the message history for the LLM
-  const messages: Array<{ role: "user" | "assistant"; content: string }> = [];
+  const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [];
 
-  // System context as the first user message
+  // System prompt
+  messages.push({ role: "system", content: SYSTEM_PROMPT });
+
+  // Context as the first user message
   const contextMsg = [
     `DEBTOR CONTEXT:`,
     `- Order: ${req.sessionContext.orderId}`,
@@ -217,18 +225,15 @@ export async function negotiate(req: NegotiateRequest): Promise<NegotiateRespons
   messages.push({ role: "user", content: contextMsg });
 
   try {
-    const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-5",
-      max_tokens: 400,
-      system: SYSTEM_PROMPT,
+    const response = await groq.chat.completions.create({
+      model: GROQ_MODEL,
+      max_tokens: 2048,
       messages,
     });
 
-    const text = response.content
-      .filter((b) => b.type === "text")
-      .map((b: any) => b.text)
-      .join("")
-      .trim();
+    const text = (response.choices[0]?.message?.content ?? "").trim();
+    console.log("[negotiate] raw content length:", text.length, "outcome:", response.choices[0]?.finish_reason);
+    console.log("[negotiate] first 200 chars:", text.slice(0, 200));
 
     // Parse the reply and structured outcome
     // The reply is everything before the last JSON line

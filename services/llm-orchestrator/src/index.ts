@@ -14,7 +14,7 @@ app.get("/health", (_req, res) => {
 //LLM classification fallback for the Decision Engine's rules engine.
 // Input: event_type + compact signal text. Output: a valid, enum-constrained
 // risk_category + narrative + confidence. Falls back to a deterministic heuristic
-// when no ANTHROPIC_API_KEY is configured.
+// when no GROQ_API_KEY is configured.
 app.post("/classify", async (req, res) => {
   const { event_type, signal } = req.body ?? {};
   if (typeof event_type !== "string" || typeof signal !== "string") {

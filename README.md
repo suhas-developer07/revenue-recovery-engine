@@ -1,7 +1,7 @@
 # AI Revenue Recovery
 
 An AI-powered system that detects payment failures, classifies root causes, decides compliant recovery actions through a deterministic policy layer, and executes recovery — with a full audit trail and honest batch metrics.
-
+freebuff --continue 2026-08-30T11-43-54.470Z
 > **Recovered ₹23.16L of ₹38.85L at risk (59.6%)** across a 220-record synthetic batch, with 93 actions correctly blocked by compliance rules.
 ## Problem
 
@@ -49,7 +49,7 @@ Today each leak is handled by a different, disconnected tool — or nothing at a
 - **Cache/Queue:** Redis 7
 - **Dashboard:** Next.js
 - **Payments:** Razorpay test-mode APIs
-- **LLM:** Claude (Anthropic)
+- **LLM:** Groq (free tier, Llama 3.3 70B) via OpenAI-compatible API
 - **Migrations:** Goose
 
 ## Getting Started
@@ -113,7 +113,7 @@ Spoofed/unsigned payloads are rejected with `401` and logged under "rejected web
 The **Decision Engine** (`services/decision-engine`) classifies every ingested event into one of a closed set of `risk_category` values, writing exactly one row to `classifications` per event:
 
 - **Rules engine** (`internal/classifier/rules.go`) — an ordered table of substring matchers grounded on realistic Razorpay error codes/reasons. Cheap, deterministic, handles the majority.
-- **LLM fallback** — only when no rule matches. The Go service calls `llm-orchestrator`'s `/classify` endpoint (which validates against the same closed enum via zod). With no `ANTHROPIC_API_KEY` set, it falls back to a deterministic keyword heuristic so the pipeline stays fully testable.
+- **LLM fallback** — only when no rule matches. The Go service calls `llm-orchestrator`'s `/classify` endpoint (which validates against the same closed enum via zod). With no `GROQ_API_KEY` set, it falls back to a deterministic keyword heuristic so the pipeline stays fully testable.
 - **Enum enforcement** — `ValidCategory()` is asserted on every result (rules and LLM alike) before writing, so a bad string can never corrupt Phase 3's policy matching.
 - **`priority_score`** — `amount_paise/100 × recoverability_weight[category]`, stored at classification time to drive batch prioritization later.
 - **checkout_abandoned sweep** — a `time.Ticker` background sweep detects orders past the 30-minute window that never reached a paid state (consult `internal/db/abandoned.go`). This is absence-based polling, not a webhook.
@@ -181,7 +181,7 @@ The **recovery layer**: authorized decisions become real (test-mode) Razorpay ca
 - **Idempotent per decision** — `actions.decision_id` has a UNIQUE constraint (migration `0004`), and the executor checks `getActionByDecisionId` before dispatching. A redelivered decision (HTTP retry / stream at-least-once) returns the stored result instead of double-sending a payment link or double-attempting a retry — the same bug class guarded in Phases 1 & 3.
 - **One `actions` row, always** (`internal` → `services/execution/src/handlers`) — every handler writes a `{success|failed|pending}` row with `outcome_payload`. Handlers: `RETRY_PAYMENT`, `SEND_PAYMENT_LINK`, `SEND_REMINDER` (→ `/draft` + channel adapter), `ESCALATE_TO_HUMAN` (pending human todo), `LOG_PROMISE_TO_PAY` (thin → Phase 5), `STOP_SEQUENCE` (terminal marker).
 - **Swappable channel adapters** (`services/execution/src/adapters`) — `SmsAdapter` / `EmailAdapter` / `WhatsAppAdapter` / `VoiceAdapter` implementing one `send()` interface. Stubs log the send honestly (`[EMAIL] to=cust: "..."`) and return success; swapping in Twilio/Resend later, or adding a Hinglish voice adapter in Phase 7, touches nothing else.
-- **`/draft` message copy** (`services/llm-orchestrator/src/draft.ts`) — given the risk category, the actual `root_cause_narrative` from Phase 2's classification, amount, channel and attempt number, it produces root-cause-specific copy ("looks like your bank declined this…") with a heuristic fallback when no `ANTHROPIC_API_KEY` is set. The LLM writes the wording only — it never decides whether or who to contact.
+- **`/draft` message copy** (`services/llm-orchestrator/src/draft.ts`) — given the risk category, the actual `root_cause_narrative` from Phase 2's classification, amount, channel and attempt number, it produces root-cause-specific copy ("looks like your bank declined this…") with a heuristic fallback when no `GROQ_API_KEY` is set. The LLM writes the wording only — it never decides whether or who to contact.
 - **Honest recover accounting** (`amount_recovered_paise`) — `RETRY_PAYMENT` counts the full amount **only on a confirmed Razorpay capture** (never on "attempted"). `SEND_PAYMENT_LINK` is recorded `status: pending, amount 0` until a follow-up sweep confirms the linked payment actually captured — that's exactly when it flips to `success` + the real amount. Full methodology in `docs/decisions.md` #13.
 
 Verify it:

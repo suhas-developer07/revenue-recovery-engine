@@ -1,4 +1,4 @@
-import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import { z } from "zod";
 
 /**
@@ -51,7 +51,7 @@ Rules:
 - Keep narrative to one short sentence explaining the likely root cause.`;
 
 /**
- * Deterministic heuristic fallback used when no ANTHROPIC_API_KEY is configured
+ * Deterministic heuristic fallback used when no GROQ_API_KEY is configured
  * (or the API call fails). Mirrors the Go rules table with a small keyword map.
  * This keeps the classification pipeline fully testable without burning LLM
  * calls, while still demonstrating the "rules dominate, LLM for the remainder"
@@ -88,8 +88,13 @@ export function heuristicClassify(req: ClassifyRequest): ClassifyResult {
   };
 }
 
-const anthropic = process.env.ANTHROPIC_API_KEY
-  ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+const GROQ_MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
+
+const groq = process.env.GROQ_API_KEY
+  ? new OpenAI({
+      apiKey: process.env.GROQ_API_KEY,
+      baseURL: "https://api.groq.com/openai/v1",
+    })
   : null;
 
 /**
@@ -98,29 +103,24 @@ const anthropic = process.env.ANTHROPIC_API_KEY
  * and finally "unknown". The category is ALWAYS one of RISK_CATEGORIES.
  */
 export async function classifyEvent(req: ClassifyRequest): Promise<ClassifyResult> {
-  if (!anthropic) {
+  if (!groq) {
     return heuristicClassify(req);
   }
 
   try {
-    const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-5",
-      max_tokens: 200,
-      system: SYSTEM_PROMPT,
+    const response = await groq.chat.completions.create({
+      model: GROQ_MODEL,
+      max_tokens: 1024,
       messages: [
+        { role: "system", content: SYSTEM_PROMPT },
         {
           role: "user",
-          content: `event_type: ${req.event_type}\nsignal: ${req.signal}
-\nRespond with JSON: {"category": "...", "narrative": "...", "confidence": 0.0-1.0}`,
+          content: `event_type: ${req.event_type}\nsignal: ${req.signal}\n\nRespond with JSON: {"category": "...", "narrative": "...", "confidence": 0.0-1.0}`,
         },
       ],
     });
 
-    const text = response.content
-      .filter((b) => b.type === "text")
-      .map((b: any) => b.text)
-      .join("")
-      .trim();
+    const text = (response.choices[0]?.message?.content ?? "").trim();
 
     const parsed = classifySchema.safeParse(JSON.parse(text.trim()));
     if (parsed.success) {
