@@ -151,17 +151,25 @@ CRITICAL RULES:
 6. Accept "I need to check and get back to you" as a valid non-refusal.
 7. Maximum 8 exchanges — after that, end gracefully.
 
-OUTPUT FORMAT:
-After each reply, include a structured outcome guess as JSON on a NEW LINE after your reply:
-{"outcome": "paid_now|promised|declined|escalate", "promisedDate": "ISO date if promised"}
+OUTPUT FORMAT — STRICT:
+Your response MUST have exactly two parts separated by a blank line:
 
-The outcome is your best guess at the conversation state. The system will validate it.
-- "paid_now": debtor committed to paying right now
-- "promised": debtor gave a specific future date
-- "declined": debtor clearly said they won't/can't pay
-- "escalate": conversation exhausted or debtor unresponsive — hand to human
+PART 1: Your conversational reply in Hinglish (2-3 sentences max).
 
-Always output your reply FIRST, then the JSON on the next line.`;
+PART 2: The outcome JSON on its own line (no other text on this line).
+
+Example:
+Namaste! Aapke account mein ₹500 pending hai. Kya aap abhi payment kar sakte hain?
+
+{"outcome": "escalate"}
+
+The outcome field MUST be one of: paid_now, promised, declined, escalate.
+- "paid_now": ONLY if debtor explicitly says they will pay RIGHT NOW
+- "promised": ONLY if debtor gives a specific future date
+- "declined": ONLY if debtor clearly says they will not/cannot pay
+- "escalate": for opening lines, uncertain responses, or when debtor is unresponsive
+
+For opening lines (no debtor message yet), ALWAYS use "escalate" since the debtor hasn't responded.`;
 
 const GROQ_MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
 
@@ -236,36 +244,80 @@ export async function negotiate(req: NegotiateRequest): Promise<NegotiateRespons
     console.log("[negotiate] first 200 chars:", text.slice(0, 200));
 
     // Parse the reply and structured outcome
-    // The reply is everything before the last JSON line
-    const lines = text.split("\n");
+    // Strategy 1: Look for a JSON object at the end of the text (last line)
     let agentReply = "";
     let outcomeGuess: { outcome: string; promisedDate?: string } | null = null;
 
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const trimmed = lines[i].trim();
-      if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
-        try {
-          const parsed = JSON.parse(trimmed);
-          const validated = outcomeSchema.safeParse(parsed);
-          if (validated.success) {
-            outcomeGuess = validated.data;
-            agentReply = lines.slice(0, i).join("\n").trim();
-            break;
+    // Try regex: find the LAST {...} in the text that is valid outcome JSON
+    const jsonRegex = /\{\s*"outcome"\s*:\s*"(?:paid_now|promised|declined|escalate)"(?:\s*,\s*"promisedDate"\s*:\s*"[^"]*")?\s*\}/g;
+    let lastMatch: RegExpExecArray | null = null;
+    let match: RegExpExecArray | null;
+    while ((match = jsonRegex.exec(text)) !== null) {
+      lastMatch = match;
+    }
+
+    if (lastMatch) {
+      try {
+        const parsed = JSON.parse(lastMatch[0]);
+        const validated = outcomeSchema.safeParse(parsed);
+        if (validated.success) {
+          outcomeGuess = validated.data;
+          // Remove the JSON from the text to get the reply
+          agentReply = text.slice(0, lastMatch.index).trim();
+        }
+      } catch {
+        // Parse failed, use full text as reply
+      }
+    }
+
+    // Fallback: try line-by-line scan (original approach)
+    if (!outcomeGuess) {
+      const lines = text.split("\n");
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const trimmed = lines[i].trim();
+        if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+          try {
+            const parsed = JSON.parse(trimmed);
+            const validated = outcomeSchema.safeParse(parsed);
+            if (validated.success) {
+              outcomeGuess = validated.data;
+              agentReply = lines.slice(0, i).join("\n").trim();
+              break;
+            }
+          } catch {
+            // Not valid JSON, treat as part of reply
           }
-        } catch {
-          // Not valid JSON, treat as part of reply
         }
       }
     }
 
-    if (!agentReply) agentReply = text;
+    if (!agentReply) agentReply = text.replace(/\{"outcome"[^}]*\}/g, "").trim();
     if (!outcomeGuess) {
       outcomeGuess = { outcome: "escalate" };
     }
 
+    // Only mark as resolved on terminal outcomes:
+    // - paid_now: debtor committed to paying
+    // - promised: debtor gave a specific date
+    // - decline: debtor clearly refused
+    // Opening turns and mid-conversation turns with "escalate" guess are NOT resolved
+    // ("escalate" only becomes terminal at the turn limit)
+    //
+    // CRITICAL: On the opening turn (turns === 0), the debtor hasn't responded
+    // yet, so we CANNOT know the outcome — force resolved: false regardless
+    // of what the LLM guesses.
+    const isTerminal = (
+      turns > 0 && (
+        outcomeGuess.outcome === "paid_now" ||
+        outcomeGuess.outcome === "promised" ||
+        outcomeGuess.outcome === "declined" ||
+        turnNumber >= MAX_NEGOTIATION_TURNS
+      )
+    );
+
     return {
       agentReply,
-      resolved: true,
+      resolved: isTerminal,
       outcome: outcomeGuess.outcome as NegotiateResponse["outcome"],
       promisedDate: outcomeGuess.promisedDate,
       turnNumber,

@@ -340,26 +340,27 @@ async function main() {
   const invoiceIds = await fetchReceivableEventIds(pool);
   let kept = 0;
   let writtenOff = 0;
+  let active = 0;
   const DECISION_URL =
     process.env.DECISION_ENGINE_URL || "http://localhost:8082";
   for (const eventId of invoiceIds) {
     const pid = await createPromise(DECISION_URL, eventId);
     if (!pid) continue;
     const roll = rand();
-    if (roll < 0.5) {
+    if (roll < 0.4) {
       // debtor promises and pays on time -> kept
       await respondPromise(DECISION_URL, pid, "2026-09-10");
       await advancePromise(DECISION_URL, pid, "date_arrives");
       await advancePromise(DECISION_URL, pid, "paid");
       kept++;
-    } else if (roll < 0.8) {
+    } else if (roll < 0.6) {
       // debtor misses the date, then pays late -> kept (broken -> paid)
       await respondPromise(DECISION_URL, pid, "2026-09-10");
       await advancePromise(DECISION_URL, pid, "date_arrives");
       await advancePromise(DECISION_URL, pid, "not_paid");
       await advancePromise(DECISION_URL, pid, "paid");
       kept++;
-    } else {
+    } else if (roll < 0.75) {
       // debtor never pays through the escalation ceiling -> written_off
       for (let k = 0; k < 7; k++) {
         await advancePromise(DECISION_URL, pid, "request_response");
@@ -374,11 +375,16 @@ async function main() {
         if (st === "written_off") break;
       }
       writtenOff++;
+    } else {
+      // Leave in active state for demo: promise made but not yet resolved
+      // This lets users demo the negotiate button from the promises tab
+      await respondPromise(DECISION_URL, pid, "2026-09-15");
+      active++;
     }
     await wait(30);
   }
   console.log(
-    `[synthetic] promise simulation done: kept=${kept} written_off=${writtenOff}`,
+    `[synthetic] promise simulation done: kept=${kept} written_off=${writtenOff} active=${active}`,
   );
   await redis.disconnect();
   await pool.end();
