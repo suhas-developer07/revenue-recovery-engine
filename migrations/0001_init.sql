@@ -4,12 +4,10 @@
 -- Enable UUID generation
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
--- ============================================================
--- EVENTS: raw signals coming in — the "what happened" layer
--- ============================================================
+
 CREATE TABLE events (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  source TEXT NOT NULL,              -- 'razorpay_webhook' | 'synthetic'
+  source TEXT NOT NULL,             
   event_type TEXT NOT NULL,          -- 'payment.failed', 'subscription.pending', 'invoice.expired', 'checkout.abandoned'
   order_id TEXT,
   customer_id TEXT,
@@ -28,9 +26,7 @@ CREATE TABLE processed_webhook_ids (
   processed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- ============================================================
--- CLASSIFICATIONS: the "why did this happen" layer
--- ============================================================
+
 CREATE TABLE classifications (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   event_id UUID NOT NULL REFERENCES events(id),
@@ -45,10 +41,7 @@ CREATE TABLE classifications (
 CREATE INDEX idx_classifications_event_id ON classifications(event_id);
 CREATE INDEX idx_classifications_risk_category ON classifications(risk_category);
 
--- ============================================================
--- DECISIONS: the "what should we do about it, and are we allowed" layer
--- This table IS your compliance/guardrail evidence.
--- ============================================================
+
 CREATE TABLE decisions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   event_id UUID NOT NULL REFERENCES events(id),
@@ -66,9 +59,7 @@ CREATE TABLE decisions (
 CREATE INDEX idx_decisions_event_id ON decisions(event_id);
 CREATE INDEX idx_decisions_blocked ON decisions(blocked);
 
--- ============================================================
--- ACTIONS: the "what actually happened when we tried" layer
--- ============================================================
+
 CREATE TABLE actions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   decision_id UUID NOT NULL REFERENCES decisions(id),
@@ -81,9 +72,7 @@ CREATE TABLE actions (
 CREATE INDEX idx_actions_decision_id ON actions(decision_id);
 CREATE INDEX idx_actions_status ON actions(status);
 
--- ============================================================
--- PROMISES: promise-to-pay state machine (B2B receivables spine)
--- ============================================================
+
 CREATE TABLE promises (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   event_id UUID NOT NULL REFERENCES events(id),
@@ -97,9 +86,7 @@ CREATE TABLE promises (
 CREATE INDEX idx_promises_event_id ON promises(event_id);
 CREATE INDEX idx_promises_status ON promises(status);
 
--- ============================================================
--- CUSTOMER PREFERENCES: opt-outs, mandate status — needed by the policy layer
--- ============================================================
+
 CREATE TABLE customer_preferences (
   customer_id TEXT PRIMARY KEY,
   opted_out_channels TEXT[] NOT NULL DEFAULT '{}',   -- e.g. {'sms', 'voice'}

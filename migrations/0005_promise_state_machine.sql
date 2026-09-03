@@ -1,13 +1,6 @@
 -- +goose Up
 -- +goose StatementBegin
 
--- Phase 5: promote the promises table into a real state machine.
---
--- Single source of truth: the legacy `status` column (a 4-value summary) is
--- folded into a full 8-state `state` column and then removed, so there is never a
--- second field that could drift out of sync with the machine. `responded_at` and
--- `resolved_at` capture the moments the machine cares about for metrics
--- (time-to-promise, when a promise resolved kept vs. written off).
 
 ALTER TABLE promises
   ADD COLUMN state TEXT NOT NULL DEFAULT 'notified'
